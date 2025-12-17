@@ -7,21 +7,20 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (銀行實戰版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro ", layout="wide")
 
-# 標題區
-st.title("🛡️ 債券投資組合策略大師 Pro")
+st.title("🛡️ 債券投資組合策略大師 Pro ")
 st.markdown("""
-針對高資產客戶設計的策略模組：
+針對高資產客戶設計的策略：
 1. **收益最大化**：追求最高配息。
-2. **債券梯**：依據剩餘年期佈局，打造穩定現金流。
-3. **槓鈴策略**：長短年期配置。
+2. **債券梯**：依據剩餘年期佈局。
+3. **槓鈴策略**：長短配置。
 4. **相對價值**：找出「市價 < 理論價」的被低估債券。
-5. **領息頻率組合**：自訂本金與領息頻率。
-""")
-st.divider()
+5. **領息頻率組合**：自訂本金與領息頻率 (月月配)。
+<span style='color:green'>★ Fix: 已修正雙層標題讀取問題，正確抓取 S&P/Fitch 信評。</span>
+""", unsafe_allow_html=True)
 
-# --- 2. 輔助函式 (維持不變，確保運算邏輯正確) ---
+# --- 2. 輔助函式 ---
 rating_map = {
     'AAA': 1, 'AA+': 2, 'AA': 3, 'AA-': 4,
     'A+': 5, 'A': 6, 'A-': 7,
@@ -77,28 +76,60 @@ def clean_data(file):
         else:
             df = pd.read_excel(file, engine='openpyxl')
             
+        # --- 特殊處理：雙層標題偵測 ---
+        # 檢查第一列 (index 0) 是否包含信評機構名稱
+        first_row_vals = df.iloc[0].astype(str).str.upper().tolist()
+        
+        # 建立欄位映射
         col_mapping = {}
-        for col in df.columns:
+        rating_col_indices = {} # 紀錄信評所在的 index
+        
+        # 1. 先抓標準欄位 (從 Header 抓)
+        for idx, col in enumerate(df.columns):
             c_clean = str(col).replace('\n', '').replace(' ', '').upper()
             
             if 'ISIN' in c_clean or '債券代號' in c_clean: col_mapping[col] = 'ISIN'
             elif '債券名稱' in c_clean: col_mapping[col] = 'Name'
             elif 'YTM' in c_clean or 'YTC' in c_clean: col_mapping[col] = 'YTM'
             elif '剩餘' in c_clean or '年期' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'Years_Remaining'
-            elif 'S&P' in c_clean: col_mapping[col] = 'SP_Rating'
-            elif 'FITCH' in c_clean: col_mapping[col] = 'Fitch_Rating'
-            elif 'MOODY' in c_clean: col_mapping[col] = 'Moody_Rating'
             elif '到期日' in c_clean or 'MATURITY' in c_clean: col_mapping[col] = 'Maturity'
             elif '頻率' in c_clean or 'FREQ' in c_clean: col_mapping[col] = 'Frequency'
             elif '票面' in c_clean or 'COUPON' in c_clean: col_mapping[col] = 'Coupon'
             elif 'OFFERPRICE' in c_clean or '價格' in c_clean: col_mapping[col] = 'Original_Price'
+            # 這裡不抓 Rating，改用下面的邏輯抓
         
+        # 2. 抓信評欄位 (從第一列內容抓)
+        for idx, val in enumerate(first_row_vals):
+            col_name = df.columns[idx]
+            if 'S&P' in val: 
+                rating_col_indices['SP_Rating'] = col_name
+            elif 'FITCH' in val: 
+                rating_col_indices['Fitch_Rating'] = col_name
+            elif 'MOODY' in val:
+                rating_col_indices['Moody_Rating'] = col_name
+        
+        # 3. 如果第一列沒抓到，回頭試試看 Header 有沒有 (相容舊格式)
+        if not rating_col_indices:
+            for col in df.columns:
+                c_clean = str(col).upper()
+                if 'S&P' in c_clean: rating_col_indices['SP_Rating'] = col
+                elif 'FITCH' in c_clean: rating_col_indices['Fitch_Rating'] = col
+                elif 'MOODY' in c_clean: rating_col_indices['Moody_Rating'] = col
+
+        # 重新命名
         df = df.rename(columns=col_mapping)
+        df = df.rename(columns=rating_col_indices)
         
+        # 剔除第一列 (如果是雙層標題)
+        if any(x in str(first_row_vals) for x in ['S&P', 'MOODY', 'FITCH']):
+            df = df.iloc[1:].reset_index(drop=True)
+
+        # 檢查必要欄位
         req_cols = ['ISIN', 'Name', 'YTM', 'Years_Remaining']
         if not all(c in df.columns for c in req_cols):
             return None, f"缺少必要欄位。請確認檔案包含：ISIN, 名稱, YTM, 剩餘年期。"
 
+        # 數值轉換
         df['YTM'] = pd.to_numeric(df['YTM'], errors='coerce')
         df['Years_Remaining'] = pd.to_numeric(df['Years_Remaining'], errors='coerce')
         if 'Coupon' in df.columns: df['Coupon'] = pd.to_numeric(df['Coupon'], errors='coerce')
@@ -107,15 +138,22 @@ def clean_data(file):
         df = df.dropna(subset=['YTM', 'Years_Remaining'])
         df = df[df['YTM'] > 0] 
 
-        # 信評
-        if 'SP_Rating' in df.columns: df['Rating_Source'] = df['SP_Rating']
+        # 信評邏輯修正：優先 S&P > Fitch > Moody > BBB
+        if 'SP_Rating' in df.columns: 
+            df['Rating_Source'] = df['SP_Rating']
+            # 如果 S&P 是空的，嘗試用 Fitch 補
+            if 'Fitch_Rating' in df.columns:
+                df['Rating_Source'] = df['Rating_Source'].fillna(df['Fitch_Rating'])
+        elif 'Fitch_Rating' in df.columns: 
+            df['Rating_Source'] = df['Fitch_Rating']
         elif 'Moody_Rating' in df.columns:
-            df['Rating_Source'] = df['Moody_Rating'].replace({'Aaa': 'AAA', 'Aa1':'AA+', 'Aa2':'AA', 'Aa3':'AA-', 'A1':'A+', 'A2':'A', 'A3':'A-', 'Baa1':'BBB+', 'Baa2':'BBB', 'Baa3':'BBB-'})
-        elif 'Fitch_Rating' in df.columns: df['Rating_Source'] = df['Fitch_Rating']
-        else: df['Rating_Source'] = 'BBB'
+             # 簡單映射 Moody
+             df['Rating_Source'] = df['Moody_Rating'].replace({'Aaa': 'AAA', 'Aa1':'AA+', 'Aa2':'AA', 'Aa3':'AA-', 'A1':'A+', 'A2':'A', 'A3':'A-', 'Baa1':'BBB+', 'Baa2':'BBB', 'Baa3':'BBB-'})
+        else: 
+            df['Rating_Source'] = 'BBB'
 
         df['Rating_Source'] = df['Rating_Source'].astype(str).str.strip().str.upper()
-        df['Rating_Source'] = df['Rating_Source'].replace({'N/A': 'BBB', 'NAN': 'BBB', '': 'BBB'})
+        df['Rating_Source'] = df['Rating_Source'].replace({'N/A': 'BBB', 'NAN': 'BBB', '': 'BBB', 'NAN': 'BBB'})
         df['Credit_Score'] = df['Rating_Source'].map(rating_map).fillna(10)
         
         # 頻率
@@ -223,8 +261,6 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
     
     pool = df_calc[df_calc['Years_Remaining'] >= min_dur]
     if target_freqs: pool = pool[pool['Frequency'].isin(target_freqs)]
-    
-    # 用價差排序
     pool = pool.sort_values('Valuation_Gap', ascending=False)
     
     selected = []
@@ -265,7 +301,8 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
             if allow_dup or (row['Name'] not in used_issuers):
                 bond = row.copy()
                 bond['Weight'] = weight_per_bond
-                bond['Cycle_Str'] = f"{m}月/{m+6}月"
+                # 顯示時加上 +6 個月，讓客戶知道是半年配
+                bond['Cycle_Str'] = f"{m}月 & {m+6}月" 
                 selected.append(bond)
                 used_issuers.add(row['Name'])
                 found = True
@@ -273,9 +310,8 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
 
-# --- 4. 主程式 UI (修正佈局) ---
+# --- 4. 主程式 UI ---
 
-# 【修改點 1】將檔案上傳區移到主畫面正中央，而不是側邊欄
 st.subheader("📂 步驟 1: 請先上傳債券清單")
 uploaded_file = st.file_uploader("支援銀行 Excel / CSV 格式", type=['xlsx', 'csv'])
 
@@ -284,12 +320,11 @@ if uploaded_file:
     if err:
         st.error(f"錯誤: {err}")
     else:
-        st.success(f"✅ 成功讀取 {len(df_raw)} 檔債券資料！請在左側選擇策略。")
+        st.success(f"✅ 成功讀取 {len(df_raw)} 檔債券資料！")
         
-        # --- 側邊欄：策略設定區 ---
+        # --- 側邊欄 ---
         st.sidebar.header("🧠 步驟 2: 策略設定")
         
-        # 黑名單
         all_issuers = sorted(df_raw['Name'].astype(str).unique())
         excluded_issuers = st.sidebar.multiselect("🚫 黑名單 (剔除機構)", options=all_issuers)
         if excluded_issuers:
@@ -311,7 +346,7 @@ if uploaded_file:
         portfolio = pd.DataFrame()
         df_with_alpha = pd.DataFrame() 
 
-        # --- 策略參數與執行 ---
+        # --- 參數與執行 ---
         if strategy == "收益最大化":
             t_dur = st.sidebar.slider("剩餘年期上限", 2.0, 30.0, 10.0)
             t_cred = rating_map[st.sidebar.select_slider("最低信評", list(rating_map.keys()), 'BBB')]
@@ -355,7 +390,6 @@ if uploaded_file:
         if not portfolio.empty:
             st.divider()
             
-            # 計算數據
             portfolio['Allocation %'] = (portfolio['Weight'] * 100).round(1)
             price_col = 'Original_Price' if 'Original_Price' in portfolio.columns else 'Theoretical_Price'
             portfolio['Final_Price'] = portfolio[price_col].fillna(100)
@@ -380,8 +414,8 @@ if uploaded_file:
 
             c1, c2 = st.columns([5, 5])
             with c1:
-                st.subheader("📋 建議清單 (含價差分析)")
-                cols = ['Name', 'YTM', 'Years_Remaining', 'Allocation %', 'Annual_Coupon_Amt']
+                st.subheader("📋 建議清單")
+                cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'Allocation %', 'Annual_Coupon_Amt']
                 if 'Theoretical_Price' in portfolio.columns: cols.insert(2, 'Theoretical_Price')
                 if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
                 if 'Valuation_Gap' in portfolio.columns: cols.insert(4, 'Valuation_Gap')
@@ -393,11 +427,12 @@ if uploaded_file:
                     'Theoretical_Price': '理論價格',
                     'Valuation_Gap': '潛在價差 (Alpha)',
                     'Years_Remaining': '剩餘年期',
-                    'Annual_Coupon_Amt': '預估年息'
+                    'Annual_Coupon_Amt': '預估年息',
+                    'Rating_Source': '信評',
+                    'Cycle_Str': '配息月份'
                 }
                 display_df = portfolio[cols].rename(columns=rename_dict).copy()
                 
-                # 格式化
                 for c in ['銀行報價 (Offer)', '理論價格', '潛在價差 (Alpha)', '剩餘年期']:
                     if c in display_df.columns: display_df[c] = display_df[c].map('{:.2f}'.format)
                 if '預估年息' in display_df.columns: display_df['預估年息'] = display_df['預估年息'].map('{:,.0f}'.format)
@@ -477,12 +512,9 @@ if uploaded_file:
 
         elif uploaded_file and st.session_state.get('last_run'):
             st.warning("⚠️ 找不到符合條件的債券。")
-
 else:
-    # 這是為了讓還沒上傳時，畫面不會太乾淨，給一些指引
     st.info("👆 請在上方上傳您的債券清單 Excel 檔以開始分析。")
 
-# 【修改點 2】新增合規警語 (Footer)
 st.markdown("---")
 st.markdown("""
 <div style='background-color: #ffe6e6; padding: 10px; border-radius: 5px; color: #cc0000;'>
