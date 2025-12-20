@@ -8,16 +8,16 @@ from datetime import datetime, timedelta
 import re
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V14.0 頻率除錯版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (終極完整版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
-針對高資產客戶設計的策略模組：
+針對高資產客戶設計的策略模組 (支援剩餘年期替代存續期間)：
 1. **收益最大化**：追求最高配息 (泡泡圖)。
-2. **債券梯**：依據剩餘年期佈局 (泡泡圖)。
+2. **債券梯**：依據剩餘年期佈局，分散到期風險 (泡泡圖)。
 3. **槓鈴策略**：長短年期配置 (泡泡圖)。
-4. **相對價值**：<span style='color:green'>★ Bar Chart</span> 專注於價差分析，找出被低估標的。
-5. **領息頻率組合**：<span style='color:red'>★ Fixed</span> 修復 "SEMI" 誤判為 "Monthly" 的嚴重 Bug，還原真實現金流。
+4. **相對價值**：<span style='color:green'>★ Bar Chart</span> 找出「理論價 > 市價」之低估標的。
+5. **領息頻率組合**：現金流規劃 (含月月配)。
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -32,30 +32,16 @@ rating_map = {
 
 def standardize_frequency(val):
     """
-    V14.0 修復版：嚴格的頻率判斷順序
+    嚴格頻率判斷：優先抓半年，避免 "每半年" 被誤判為年或月
     """
     s = str(val).strip().upper()
+    s = s.replace('每半年', 'SEMI').replace('半年', 'SEMI')
     
-    # 1. 絕對優先判斷 "半年" (包含 SEMI, HALF)
-    # 只要有這些字，就是半年配，不用往下看了
-    if any(x in s for x in ['半年', 'SEMI', 'HALF']): 
-        return '半年配'
-    
-    # 2. 判斷季
-    if any(x in s for x in ['季', 'QUARTER', 'Q']): 
-        return '季配'
-    
-    # 3. 判斷月 (必須明確是 MONTH 或 月)
-    # 移除單字 'M' 的模糊判斷，避免誤傷
-    if any(x in s for x in ['月', 'MONTH']): 
-        return '月配'
-    
-    # 4. 判斷年
-    if any(x in s for x in ['年', 'YEAR', 'ANNUAL']): 
-        return '年配'
-    
-    # 5. 預設值 (如果都沒寫，市場慣例是半年配)
-    return '半年配'
+    if any(x in s for x in ['SEMI', 'HALF']): return '半年配'
+    if any(x in s for x in ['季', 'QUARTER', 'Q']): return '季配'
+    if any(x in s for x in ['月', 'MONTH']): return '月配' # 已排除 SEMI 的 M
+    if any(x in s for x in ['年', 'YEAR', 'ANNUAL']): return '年配'
+    return '半年配' # 預設
 
 def excel_date_to_datetime(serial):
     try:
@@ -104,6 +90,7 @@ def clean_data(file):
             if 'ISIN' in c_clean or '債券代號' in c_clean: col_mapping[col] = 'ISIN'
             elif '債券名稱' in c_clean: col_mapping[col] = 'Name'
             elif 'YTM' in c_clean or 'YTC' in c_clean: col_mapping[col] = 'YTM'
+            # 關鍵：將「剩餘年期」直接對應到 Years_Remaining
             elif '剩餘' in c_clean or '年期' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'Years_Remaining'
             elif '到期日' in c_clean or 'MATURITY' in c_clean: col_mapping[col] = 'Maturity'
             elif '頻率' in c_clean or 'FREQ' in c_clean: col_mapping[col] = 'Frequency'
@@ -112,7 +99,7 @@ def clean_data(file):
 
         df = df.rename(columns=col_mapping)
         
-        # 信評偵測
+        # 信評偵測 (暴力掃描)
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -143,7 +130,7 @@ def clean_data(file):
 
         req_cols = ['ISIN', 'Name', 'YTM', 'Years_Remaining']
         if not all(c in df.columns for c in req_cols):
-            return None, f"缺少必要欄位: {req_cols}"
+            return None, f"缺少必要欄位: {req_cols}。請確認 Excel 包含「剩餘年期」或類似欄位。"
 
         df['YTM'] = pd.to_numeric(df['YTM'], errors='coerce')
         df['Years_Remaining'] = pd.to_numeric(df['Years_Remaining'], errors='coerce')
@@ -153,7 +140,7 @@ def clean_data(file):
         df = df.dropna(subset=['YTM', 'Years_Remaining'])
         df = df[df['YTM'] > 0] 
 
-        # 信評
+        # 信評清洗
         for r in ['SP_Rating', 'Fitch_Rating', 'Moody_Rating']:
             if r not in df.columns: df[r] = np.nan
         invalid_list = ['N/A', 'NA', 'NAN', '-', ' ', '']
@@ -166,7 +153,6 @@ def clean_data(file):
         df['Rating_Source'] = df['SP_Rating'].fillna(df['Fitch_Rating']).fillna(df['Moody_Clean']).fillna('BBB')
         df['Credit_Score'] = df['Rating_Source'].map(rating_map).fillna(10)
         
-        # 頻率標準化 (使用修復後的函數)
         if 'Frequency' in df.columns: 
             df['Frequency'] = df['Frequency'].apply(standardize_frequency)
         else: 
@@ -215,14 +201,15 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
         p = np.poly1d(z)
         df_calc['Fair_YTM'] = p(df_calc['Years_Remaining'])
 
-    # 算合理價格 & 價差
+    # 1. 算出合理價格
     df_calc['Fair_Price'] = df_calc.apply(lambda row: calculate_price_from_yield(row, row['Fair_YTM']), axis=1)
+    # 2. 算出價差 (Gap > 0 代表便宜)
     df_calc['Valuation_Gap'] = df_calc['Fair_Price'] - df_calc['Original_Price']
 
     pool = df_calc[df_calc['Years_Remaining'] >= min_dur]
     if target_freqs: pool = pool[pool['Frequency'].isin(target_freqs)]
     
-    # 排序：Valuation_Gap 越大越好
+    # 依價差排序
     pool = pool.sort_values('Valuation_Gap', ascending=False)
     
     selected = []
@@ -438,7 +425,9 @@ if uploaded_file:
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
 
             with c2:
-                # 【視覺分流】
+                # -----------------------
+                # 圖表顯示區 (視覺分流)
+                # -----------------------
                 if strategy == "相對價值":
                     st.subheader("📊 潛在價差分析 (Spread Chart)")
                     st.caption("顯示「理論價 - 銀行價」。**綠色柱狀越高，代表便宜 (低估) 越多**。")
@@ -455,9 +444,9 @@ if uploaded_file:
                     st.plotly_chart(fig_gap, use_container_width=True)
 
                 else:
-                    # 其他策略：主圖為 XY 散佈圖
+                    # 其他策略：主圖為 XY 散佈圖，現金流圖移到 Tab 2
                     st.subheader("風險/收益分佈圖 (Risk/Return)")
-                    tab_main, tab_cf = st.tabs(["📈 泡泡圖 (Scatter)", "💰 現金流 (Cash Flow)"])
+                    tab_main, tab_cf, tab_risk = st.tabs(["📈 泡泡圖 (Scatter)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試"])
                     
                     with tab_main:
                         df_raw['Type'] = '未選入'
@@ -469,7 +458,8 @@ if uploaded_file:
                             all_plot, x='Years_Remaining', y='YTM', 
                             color='Type', color_discrete_map=color_map, 
                             hover_data=['Name'],
-                            size=all_plot['Type'].map({'未選入': 5, '建議買入': 15, '已剔除': 3})
+                            size=all_plot['Type'].map({'未選入': 5, '建議買入': 15, '已剔除': 3}),
+                            title=f"{strategy} - 剩餘年期 vs 殖利率"
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -478,8 +468,8 @@ if uploaded_file:
                         months = list(range(1, 13))
                         cash_flow = [0] * 12
                         for idx, row in portfolio.iterrows():
+                            # 使用最嚴格的頻率判斷
                             f_raw = str(row.get('Frequency', '')).upper()
-                            # 這裡會使用修正後的 standardize_frequency，絕對不會誤判成月配
                             freq_val = standardize_frequency(f_raw)
                             
                             coupon_amt = row['Annual_Coupon_Amt']
@@ -494,7 +484,7 @@ if uploaded_file:
                                 for i in range(4): cash_flow[(m_idx + i*3) % 12] += per_pay
                             elif freq_val == '年配':
                                 cash_flow[m_idx] += coupon_amt
-                            else: # 半年配 (包含原先被誤判的 SEMI/每半年)
+                            else: # 半年配
                                 per_pay = coupon_amt / 2
                                 cash_flow[m_idx] += per_pay
                                 cash_flow[(m_idx + 6) % 12] += per_pay
@@ -503,6 +493,27 @@ if uploaded_file:
                         fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title=f"本金 ${investment_amt:,.0f} 之現金流模擬")
                         fig_cf.update_traces(marker_color='#2ecc71')
                         st.plotly_chart(fig_cf, use_container_width=True)
+                    
+                    with tab_risk:
+                        # 風險情境模擬 (Sensitivity Analysis)
+                        st.caption("模擬市場利率變動對總資產(價差+利息)的影響")
+                        scenarios = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+                        res_risk = []
+                        for shock in scenarios:
+                            # 簡單估算：Delta Price% ~= -Duration * Shock%
+                            # 使用 Years_Remaining 作為 Duration 替代
+                            cap_gain = -1 * avg_years * (shock/100) * investment_amt
+                            income = total_coupon
+                            total_ret = cap_gain + income
+                            res_risk.append({'情境': f"利率{shock:+}%", '資本損益': cap_gain, '利息收入': income, '總報酬': total_ret})
+                        
+                        df_risk = pd.DataFrame(res_risk)
+                        fig_risk = go.Figure()
+                        fig_risk.add_trace(go.Bar(x=df_risk['情境'], y=df_risk['資本損益'], name='資本損益', marker_color='#e74c3c'))
+                        fig_risk.add_trace(go.Bar(x=df_risk['情境'], y=df_risk['利息收入'], name='利息收入', marker_color='#3498db'))
+                        fig_risk.add_trace(go.Scatter(x=df_risk['情境'], y=df_risk['總報酬'], name='總報酬', mode='lines+markers', line=dict(color='gold', width=3)))
+                        fig_risk.update_layout(barmode='relative', title="利率敏感度分析")
+                        st.plotly_chart(fig_risk, use_container_width=True)
 
         elif uploaded_file and st.session_state.get('last_run'):
             st.warning("⚠️ 找不到符合條件的債券。")
@@ -517,6 +528,7 @@ st.markdown("""
     1. 本工具僅供投資試算與模擬使用，不代表任何形式之投資建議或獲利保證。<br>
     2. 債券價格、殖利率與配息金額均會隨市場波動，實際交易價格與條件請以銀行當下報價為準。<br>
     3. 投資人應自行評估風險承受能力，並詳閱公開說明書。外幣投資需自行承擔匯率風險。<br>
-    4. 本系統之理論價格與價差分析僅為數學模型推估，非市場實際成交價格。
+    4. 本系統之理論價格與價差分析僅為數學模型推估，非市場實際成交價格。<br>
+    5. 本系統使用「剩餘年期」作為存續期間之替代指標進行風險估算。
 </div>
 """, unsafe_allow_html=True)
