@@ -6,20 +6,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
-import io
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V22.0 下載修復版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (機構情報版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
 針對高資產客戶設計的策略模組：
 1. **收益最大化**：追求最高配息。
-2. **債券梯**：<span style='color:blue'>★ Custom</span> 自訂年期與檔數。
-3. **槓鈴策略**：<span style='color:blue'>★ Custom</span> 自訂總檔數。
+2. **債券梯**：自訂年期與檔數。
+3. **槓鈴策略**：自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:red'>★ Fixed: 修復 Excel 下載功能 (改用 openpyxl 引擎)。</span>
+<span style='color:purple'>★ New Feature: 新增「發行機構簡介卡」，自動分析機構背景與信評亮點。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -31,6 +30,33 @@ rating_map = {
     'BB+': 11, 'BB': 12, 'BB-': 13,
     'B+': 14, 'B': 15, 'B-': 16
 }
+
+def get_issuer_profile(name):
+    """
+    簡易的關鍵字對應資料庫，模擬機構簡介
+    """
+    n = str(name).upper()
+    
+    if 'TREASURY' in n or 'GOVT' in n or '美國公債' in n:
+        return "🇺🇸 **美國公債 (US Treasury)**", "全球無風險資產定價錨，流動性最高，信用風險極低，適合做為核心資產配置的防禦部位。"
+    
+    if any(x in n for x in ['GOLDMAN', 'GS', '高盛']):
+        return "🏦 **高盛證券 (Goldman Sachs)**", "全球頂尖投資銀行，被視為系統重要性金融機構 (G-SIB)。獲利能力強，但受資本市場波動影響較大，適合追求高票息的投資人。"
+    
+    if any(x in n for x in ['MORGAN', 'MS', 'JPM', 'CITI', 'BOA', 'BAC', 'WELLS']):
+        return "🏦 **美國大型銀行 (US Major Banks)**", "屬全球系統性重要銀行，受聯準會嚴格監管，資本適足率高。債券流動性佳，是投資等級債的主流標的。"
+    
+    if any(x in n for x in ['APPLE', 'AAPL', 'MICROSOFT', 'MSFT', 'GOOGLE', 'AMAZON']):
+        return "💻 **美國科技巨頭 (Big Tech)**", "擁有龐大現金流與極強的護城河，信用評等通常極高 (AA~AAA)，違約風險極低，適合保守型長線投資人。"
+    
+    if any(x in n for x in ['AT&T', 'VERIZON', 'T-MOBILE']):
+        return "📡 **電信龍頭 (Telecom)**", "現金流穩定，屬防禦型產業。雖然負債比率通常較高，但營運模式具備公用事業特性，配息穩定。"
+    
+    if 'HSBC' in n:
+        return "🌏 **滙豐控股 (HSBC)**", "全球佈局的英系銀行，在新興市場與亞洲業務佔比高，受地緣政治與全球貿易影響較大。"
+
+    # 預設回傳
+    return "🏢 **投資級公司債 (IG Corp)**", "該發行機構為投資等級企業，具備一定規模之營運基礎。建議參閱公開說明書以了解詳細財務狀況。"
 
 def standardize_frequency(val):
     s = str(val).strip().upper()
@@ -431,26 +457,11 @@ if uploaded_file:
             c1, c2 = st.columns([5, 5])
             with c1:
                 st.subheader("📋 建議清單")
-                
-                # --- 下載按鈕 (修復版: 使用 openpyxl) ---
-                output_df = portfolio.copy()
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    output_df.to_excel(writer, index=False, sheet_name='Bond_Portfolio')
-                processed_data = output.getvalue()
-                st.download_button(
-                    label="📥 下載 Excel 報表",
-                    data=processed_data,
-                    file_name='bond_portfolio_report.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-
                 cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'Calc_Mod_Duration', 'Allocation %', 'Annual_Coupon_Amt']
                 if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
                 if 'Implied_Price' in portfolio.columns: cols.insert(4, 'Implied_Price')
                 portfolio['Display_Gap'] = portfolio['Implied_Price'] - portfolio['Original_Price']
                 cols.insert(5, 'Display_Gap')
-                
                 if 'Frequency' in portfolio.columns: cols.append('Frequency')
                 if 'Cycle_Str' in portfolio.columns: cols.insert(1, 'Cycle_Str')
                 rename_dict = {'Original_Price': '銀行報價 (Offer)', 'Implied_Price': '理論價格 (Theoretical)', 'Display_Gap': '價差 (Gap)', 'Years_Remaining': '剩餘年期', 'Calc_Mod_Duration': '存續期間 (Dur)', 'Annual_Coupon_Amt': '預估年息', 'Rating_Source': '信評', 'Cycle_Str': '配息月份'}
@@ -460,6 +471,13 @@ if uploaded_file:
                     if c in display_df.columns: display_df[c] = display_df[c].map('{:.2f}'.format)
                 if '預估年息' in display_df.columns: display_df['預估年息'] = display_df['預估年息'].map('{:,.0f}'.format)
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
+                
+                # --- 新增：發行機構簡介卡 ---
+                st.markdown("### 🏦 投資組合發行機構速覽")
+                unique_issuers = portfolio['Name'].unique()
+                for issuer in unique_issuers:
+                    title, desc = get_issuer_profile(issuer)
+                    st.info(f"{title}\n\n{desc}")
 
             with c2:
                 if strategy == "相對價值":
