@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import re
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (視覺分流版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V14.0 頻率除錯版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -17,7 +17,7 @@ st.markdown("""
 2. **債券梯**：依據剩餘年期佈局 (泡泡圖)。
 3. **槓鈴策略**：長短年期配置 (泡泡圖)。
 4. **相對價值**：<span style='color:green'>★ Bar Chart</span> 專注於價差分析，找出被低估標的。
-5. **領息頻率組合**：自訂本金與領息頻率 (泡泡圖 + 完整金流)。
+5. **領息頻率組合**：<span style='color:red'>★ Fixed</span> 修復 "SEMI" 誤判為 "Monthly" 的嚴重 Bug，還原真實現金流。
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -31,15 +31,31 @@ rating_map = {
 }
 
 def standardize_frequency(val):
+    """
+    V14.0 修復版：嚴格的頻率判斷順序
+    """
     s = str(val).strip().upper()
-    # 暴力替換，確保 "每半年" 絕對被識別為 "半年配"
-    s = s.replace('每半年', 'SEMI').replace('半年', 'SEMI')
     
-    if any(x in s for x in ['M', 'MONTH', '月']): return '月配'
-    if any(x in s for x in ['Q', 'QUARTER', '季']): return '季配'
-    if any(x in s for x in ['SEMI', 'HALF', 'SEMI']): return '半年配' 
-    if any(x in s for x in ['A', 'ANNUAL', 'YEAR', '年']): return '年配'
-    return '半年配' # 預設
+    # 1. 絕對優先判斷 "半年" (包含 SEMI, HALF)
+    # 只要有這些字，就是半年配，不用往下看了
+    if any(x in s for x in ['半年', 'SEMI', 'HALF']): 
+        return '半年配'
+    
+    # 2. 判斷季
+    if any(x in s for x in ['季', 'QUARTER', 'Q']): 
+        return '季配'
+    
+    # 3. 判斷月 (必須明確是 MONTH 或 月)
+    # 移除單字 'M' 的模糊判斷，避免誤傷
+    if any(x in s for x in ['月', 'MONTH']): 
+        return '月配'
+    
+    # 4. 判斷年
+    if any(x in s for x in ['年', 'YEAR', 'ANNUAL']): 
+        return '年配'
+    
+    # 5. 預設值 (如果都沒寫，市場慣例是半年配)
+    return '半年配'
 
 def excel_date_to_datetime(serial):
     try:
@@ -52,6 +68,7 @@ def calculate_price_from_yield(row, target_ytm_percent):
         ytm = target_ytm_percent / 100
         coupon_rate = row.get('Coupon', row['YTM']) / 100 
         years = row['Years_Remaining']
+        
         freq_std = standardize_frequency(row.get('Frequency', '半年配'))
         freq_map = {'月配': 12, '季配': 4, '半年配': 2, '年配': 1}
         freq = freq_map.get(freq_std, 2)
@@ -149,7 +166,7 @@ def clean_data(file):
         df['Rating_Source'] = df['SP_Rating'].fillna(df['Fitch_Rating']).fillna(df['Moody_Clean']).fillna('BBB')
         df['Credit_Score'] = df['Rating_Source'].map(rating_map).fillna(10)
         
-        # 頻率標準化
+        # 頻率標準化 (使用修復後的函數)
         if 'Frequency' in df.columns: 
             df['Frequency'] = df['Frequency'].apply(standardize_frequency)
         else: 
@@ -424,7 +441,7 @@ if uploaded_file:
                 # 【視覺分流】
                 if strategy == "相對價值":
                     st.subheader("📊 潛在價差分析 (Spread Chart)")
-                    st.caption("顯示「理論價 - 銀行價」。**綠色柱狀越高，代表買入越划算**。")
+                    st.caption("顯示「理論價 - 銀行價」。**綠色柱狀越高，代表便宜 (低估) 越多**。")
                     
                     portfolio_sorted = portfolio.sort_values('Valuation_Gap', ascending=False)
                     fig_gap = px.bar(
@@ -436,7 +453,6 @@ if uploaded_file:
                     )
                     fig_gap.update_layout(xaxis_title="債券名稱", yaxis_title="價差 (元)")
                     st.plotly_chart(fig_gap, use_container_width=True)
-                    # XY圖已完全移除
 
                 else:
                     # 其他策略：主圖為 XY 散佈圖
@@ -462,9 +478,8 @@ if uploaded_file:
                         months = list(range(1, 13))
                         cash_flow = [0] * 12
                         for idx, row in portfolio.iterrows():
-                            # 強制標準化
                             f_raw = str(row.get('Frequency', '')).upper()
-                            f_raw = f_raw.replace('每半年', 'SEMI').replace('半年', 'SEMI')
+                            # 這裡會使用修正後的 standardize_frequency，絕對不會誤判成月配
                             freq_val = standardize_frequency(f_raw)
                             
                             coupon_amt = row['Annual_Coupon_Amt']
@@ -479,7 +494,7 @@ if uploaded_file:
                                 for i in range(4): cash_flow[(m_idx + i*3) % 12] += per_pay
                             elif freq_val == '年配':
                                 cash_flow[m_idx] += coupon_amt
-                            else: # 半年配 (預設)
+                            else: # 半年配 (包含原先被誤判的 SEMI/每半年)
                                 per_pay = coupon_amt / 2
                                 cash_flow[m_idx] += per_pay
                                 cash_flow[(m_idx + 6) % 12] += per_pay
