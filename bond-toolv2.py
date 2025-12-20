@@ -5,10 +5,10 @@ from scipy.optimize import linprog, curve_fit
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import re
+import io
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V20.0 風險圖表優化版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V21.0 列印增強版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -18,7 +18,7 @@ st.markdown("""
 3. **槓鈴策略**：<span style='color:blue'>★ Custom</span> 自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:red'>★ New: 風險壓力測試圖表優化，跌幅文字移至 Bar 下方，確保清晰可見。</span>
+<span style='color:orange'>★ Print Ready: 新增「下載 Excel 報表」功能，方便排版列印 A4 紙。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -33,7 +33,6 @@ rating_map = {
 
 def standardize_frequency(val):
     s = str(val).strip().upper()
-    # 絕對優先判斷 "半年" (包含 SEMI, HALF)
     if any(x in s for x in ['半年', 'SEMI', 'HALF']): return '半年配'
     if any(x in s for x in ['季', 'QUARTER', 'Q']): return '季配'
     if any(x in s for x in ['月', 'MONTH']): return '月配'
@@ -107,7 +106,6 @@ def clean_data(file):
 
         df = df.rename(columns=col_mapping)
         
-        # 信評偵測
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -162,7 +160,6 @@ def clean_data(file):
         if 'Frequency' in df.columns: df['Frequency'] = df['Frequency'].apply(standardize_frequency)
         else: df['Frequency'] = '半年配'
 
-        # 計算理論價格 (基於自身 YTM) 與 Duration
         res = df.apply(lambda r: calculate_duration_and_price(r), axis=1)
         df['Implied_Price'] = res.apply(lambda x: x[0])
         df['Calc_Mod_Duration'] = res.apply(lambda x: x[1])
@@ -211,7 +208,6 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
             p = np.poly1d(z)
             df_calc['Fair_YTM'] = p(df_calc['Years_Remaining'])
 
-    # 使用 calculate_duration_and_price 避免 NameError
     df_calc['Fair_Price'] = df_calc.apply(lambda row: calculate_duration_and_price(row, override_ytm=row['Fair_YTM'])[0], axis=1)
     df_calc['Valuation_Gap'] = df_calc['Fair_Price'] - df_calc['Original_Price']
 
@@ -433,7 +429,24 @@ if uploaded_file:
 
             c1, c2 = st.columns([5, 5])
             with c1:
+                # === 下載 Excel 按鈕 ===
                 st.subheader("📋 建議清單")
+                
+                # 準備要下載的 DataFrame
+                output_df = portfolio.copy()
+                # 轉換為 Excel in memory
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    output_df.to_excel(writer, index=False, sheet_name='Bond_Portfolio')
+                processed_data = output.getvalue()
+                
+                st.download_button(
+                    label="📥 下載 Excel 報表 (列印用)",
+                    data=processed_data,
+                    file_name='bond_portfolio_report.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+
                 cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'Calc_Mod_Duration', 'Allocation %', 'Annual_Coupon_Amt']
                 if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
                 if 'Implied_Price' in portfolio.columns: cols.insert(4, 'Implied_Price')
@@ -496,7 +509,6 @@ if uploaded_file:
                         coupon_amt = row['Annual_Coupon_Amt']
                         m = int(row['Pay_Month']) if 'Pay_Month' in row else np.random.randint(1,7)
                         m_idx = m - 1
-                        
                         if freq_val == '月配':
                             per_pay = coupon_amt / 12
                             for i in range(12): cash_flow[i] += per_pay
@@ -524,11 +536,8 @@ if uploaded_file:
                         cap_gain = -1 * avg_duration * (shock/100) * market_val
                         income = total_coupon
                         total_ret = cap_gain + income
-                        
-                        # 計算百分比
                         cap_gain_pct = (cap_gain / investment_amt) * 100
                         total_ret_pct = (total_ret / investment_amt) * 100
-                        
                         res_risk.append({
                             '情境': f"利率{shock:+}%", 
                             '資本損益': cap_gain, 
@@ -541,40 +550,18 @@ if uploaded_file:
                     df_risk = pd.DataFrame(res_risk)
                     fig_risk = go.Figure()
                     
-                    # 資本損益 (價差)
-                    # 【關鍵優化】動態調整文字位置
-                    # 負值 (跌) -> outside (下方)
-                    # 正值 (漲) -> inside (內部)
+                    # 智慧調整文字位置：負值(outside), 正值(inside)
                     text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
                     
                     fig_risk.add_trace(go.Bar(
-                        x=df_risk['情境'], 
-                        y=df_risk['資本損益'], 
+                        x=df_risk['情境'], y=df_risk['資本損益'], 
                         name='資本損益 (不含息)', 
-                        marker_color=['#e74c3c' if x < 0 else '#2ecc71' for x in df_risk['資本損益']],
-                        text=df_risk['資本漲跌幅'],
+                        marker_color=['#e74c3c' if x < 0 else '#2ecc71' for x in df_risk['資本損益']], 
+                        text=df_risk['資本漲跌幅'], 
                         textposition=text_positions
                     ))
-                    
-                    # 利息收入
-                    fig_risk.add_trace(go.Bar(
-                        x=df_risk['情境'], 
-                        y=df_risk['利息收入'], 
-                        name='利息收入 (預估一年)', 
-                        marker_color='#3498db'
-                    ))
-                    
-                    # 總報酬
-                    fig_risk.add_trace(go.Scatter(
-                        x=df_risk['情境'], 
-                        y=df_risk['總報酬'], 
-                        name='總報酬 (含息)', 
-                        mode='lines+markers+text', 
-                        line=dict(color='gold', width=3), 
-                        text=df_risk['總報酬漲跌幅'], 
-                        textposition="top center"
-                    ))
-                    
+                    fig_risk.add_trace(go.Bar(x=df_risk['情境'], y=df_risk['利息收入'], name='利息收入 (預估一年)', marker_color='#3498db'))
+                    fig_risk.add_trace(go.Scatter(x=df_risk['情境'], y=df_risk['總報酬'], name='總報酬 (含息)', mode='lines+markers+text', line=dict(color='gold', width=3), text=df_risk['總報酬漲跌幅'], textposition="top center"))
                     fig_risk.update_layout(barmode='relative', title="利率敏感度分析 (含漲跌幅 %)")
                     st.plotly_chart(fig_risk, use_container_width=True)
 
