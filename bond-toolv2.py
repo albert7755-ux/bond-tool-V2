@@ -9,7 +9,7 @@ import re
 import io
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V25.0 智慧情報版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V27.0 平均信評版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -19,11 +19,12 @@ st.markdown("""
 3. **槓鈴策略**：自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:purple'>★ Intelligence: 內建「智慧產業識別引擎」，精準提供各類股債券之投資屬性與風險提示。</span>
+<span style='color:brown'>★ New Metric: 新增「平均信用評等 (Weighted Average Rating)」計算功能。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
 # --- 2. 輔助函式 ---
+# 分數對照表 (越小越好)
 rating_map = {
     'AAA': 1, 'AA+': 2, 'AA': 3, 'AA-': 4,
     'A+': 5, 'A': 6, 'A-': 7,
@@ -32,84 +33,27 @@ rating_map = {
     'B+': 14, 'B': 15, 'B-': 16
 }
 
-def get_issuer_profile(name):
+# 【新增】反向對照表 (分數轉文字)
+score_to_rating_map = {v: k for k, v in rating_map.items()}
+
+def get_weighted_average_rating(portfolio):
     """
-    智慧產業識別引擎 (Smart Industry Recognizer)
-    透過關鍵字匹配，提供更精準的機構簡介與風險提示。
+    計算加權平均信評
     """
-    n = str(name).upper()
-    
-    # 1. 國家主權 (Sovereign)
-    if any(x in n for x in ['TREASURY', 'GOVT', 'UNITED STATES', '美國公債']):
-        return "🇺🇸 **美國公債 (US Treasury)**", "【無風險資產】全球金融資產定價錨，流動性最佳。雖收益率低於公司債，但具備最高的資本保護力，適合做為投資組合的核心防禦部位。"
-    
-    # 2. 金融銀行業 (Banking - G-SIBs)
-    if any(x in n for x in ['GOLDMAN', 'GS', 'MORGAN STANLEY', 'MS ', 'JPM', 'CHASE', 'CITI', 'BANK OF AMERICA', 'BAC', 'WELLS FARGO', 'HSBC', 'UBS', 'BARCLAYS', 'BNP', 'DEUTSCHE', 'SANTANDER']):
-        return "🏦 **全球系統性銀行 (G-SIBs)**", "【金融核心】受巴塞爾協定與聯準會嚴格監管，資本適足率高，違約風險極低。此類債券流動性極佳，且通常提供比公債更好的信用利差。"
-    
-    if any(x in n for x in ['CAPITAL ONE', 'AMERICAN EXPRESS', 'ALLY', 'SYNCHRONY']):
-        return "💳 **消費金融與信用卡 (Consumer Finance)**", "【循環信貸】業務高度依賴消費者支出與就業數據。在經濟擴張期獲利強勁，但在衰退期壞帳風險可能上升，波動度略高於傳統銀行。"
-
-    if any(x in n for x in ['BERKSHIRE', 'ALLIANZ', 'AXA', 'METLIFE', 'PRUDENTIAL', 'AIG']):
-        return "☂️ **保險與波克夏 (Insurance / Conglomerate)**", "【長線資金】保險業擁有龐大的浮存金，投資風格穩健保守。波克夏(Berkshire Hathaway)則具備極強的資產負債表，信用評等極高。"
-
-    # 3. 科技巨頭 (Big Tech)
-    if any(x in n for x in ['APPLE', 'AAPL', 'MICROSOFT', 'MSFT', 'GOOGLE', 'ALPHABET', 'AMAZON', 'META', 'FACEBOOK']):
-        return "💻 **科技巨頭 (Big Tech)**", "【現金牛】擁有全球最強勁的資產負債表與現金流，護城河極深。其信用風險極低，常被視為「類公債」的高級企業債，適合保守投資人。"
-    
-    if any(x in n for x in ['INTEL', 'NVIDIA', 'AMD', 'QUALCOMM', 'TSMC', 'BROADCOM', 'MICRON', 'TEXAS INSTRUMENT']):
-        return "💾 **半導體晶片 (Semiconductor)**", "【成長週期】產業受景氣循環與庫存週期影響較大，但受惠於 AI 與數位化趨勢，長期成長動能強。需留意資本支出(Capex)對現金流的影響。"
-    
-    if any(x in n for x in ['ORACLE', 'IBM', 'CISCO', 'SALESFORCE', 'ADOBE']):
-        return "☁️ **軟體與企業服務 (Enterprise Tech)**", "【訂閱經濟】營收模式多為訂閱制，現金流相對穩定可預測。屬於成熟科技股，波動度通常低於硬體股。"
-
-    # 4. 通訊電信 (Telecom)
-    if any(x in n for x in ['AT&T', 'VERIZON', 'T-MOBILE', 'VODAFONE', 'ORANGE', 'TELEFONICA']):
-        return "📡 **電信運營商 (Telecom)**", "【高息防禦】典型的防禦型板塊，營運模式類似公用事業，現金流非常穩定。特徵是負債比率通常較高(因5G建設)，但擁有穩定的配息能力。"
-
-    # 5. 醫療保健 (Healthcare)
-    if any(x in n for x in ['PFIZER', 'JOHNSON', 'J&J', 'MERCK', 'ABBVIE', 'BRISTOL', 'GILIAD', 'AMGEN', 'ASTRAZENECA']):
-        return "💊 **製藥與生技 (Pharma & Biotech)**", "【抗衰退】醫療需求缺乏彈性，受景氣波動影響小。大型藥廠擁有專利護城河與強大現金流，是高品質的防禦性投資標的。"
-    
-    if any(x in n for x in ['UNITEDHEALTH', 'CVS', 'CIGNA', 'ELEVANCE']):
-        return "🏥 **醫療保險與服務 (Managed Care)**", "【剛性需求】受惠於人口老化與醫療支出增加，營運穩健。需留意政府醫療政策(如藥價談判)對毛利率的潛在影響。"
-
-    # 6. 能源與原物料 (Energy & Materials)
-    if any(x in n for x in ['EXXON', 'CHEVRON', 'SHELL', 'BP', 'TOTAL', 'CONOCO', 'OCCIDENTAL']):
-        return "🛢️ **綜合能源巨頭 (Integrated Energy)**", "【油價連動】獲利與原油價格高度相關。大型能源公司歷經景氣循環考驗，致力於去槓桿與配息，現金流產生能力極強。"
-    
-    if any(x in n for x in ['RIO TINTO', 'BHP', 'VALE', 'FREEPORT']):
-        return "⛏️ **礦業與原物料 (Mining & Materials)**", "【通膨對沖】屬於景氣循環股，在通膨時期通常表現較佳。債券價格易受大宗商品價格與中國需求波動影響。"
-
-    # 7. 汽車與工業 (Auto & Industrial)
-    if any(x in n for x in ['FORD', 'GENERAL MOTORS', 'GM', 'TOYOTA', 'HONDA', 'VOLKSWAGEN', 'BMW', 'MERCEDES']):
-        return "🚗 **汽車製造 (Automobile)**", "【循環消費】受景氣與利率影響大，且屬重資產行業。傳統車廠正面臨電動車轉型支出壓力，部分公司信評可能位於 BBB 邊緣，需關注現金流狀況。"
-    
-    if any(x in n for x in ['BOEING', 'LOCKHEED', 'RAYTHEON', 'NORTHROP', 'GENERAL DYNAMICS']):
-        return "✈️ **航太與國防 (Aerospace & Defense)**", "【地緣政治】受惠於國防預算增加與地緣政治緊張。多為政府長期合約，營收能見度高，具備獨特的避險屬性。"
-    
-    if any(x in n for x in ['CATERPILLAR', 'DEERE', '3M', 'HONEYWELL', 'GE']):
-        return "🏗️ **工業巨頭 (Industrial)**", "【經濟櫥窗】與全球經濟成長率高度連動。這些公司通常歷史悠久，信評穩健，是投資等級債的重要組成部分。"
-
-    # 8. 必需消費 (Consumer Staples)
-    if any(x in n for x in ['COCA', 'PEPSI', 'MCDONALD', 'STARBUCKS', 'WALMART', 'COSTCO', 'PROCTER', 'PG', 'NESTLE']):
-        return "🛒 **必需消費與零售 (Consumer Staples)**", "【抗通膨】擁有強大品牌定價權，能將通膨成本轉嫁給消費者。無論景氣好壞，民眾皆需消費，故債券表現極為抗跌。"
-
-    # 9. 公用事業 (Utilities)
-    if any(x in n for x in ['DUKE', 'SOUTHERN', 'DOMINION', 'NEXTERA', 'PACIFIC GAS', 'EDISON']):
-        return "⚡ **公用事業 (Utilities)**", "【特許行業】受政府監管，擁有區域壟斷地位。營收與現金流極度穩定，類似「類債券」股票，是追求穩定收益的首選板塊。"
-
-    # 10. 媒體與娛樂
-    if any(x in n for x in ['DISNEY', 'NETFLIX', 'COMCAST', 'WARNER']):
-        return "🎬 **媒體與娛樂 (Media)**", "【內容為王】現金流取決於訂閱戶數與廣告收入。串流媒體競爭激烈，需關注其內容製作成本與負債比率的變化。"
-
-    # 預設回傳 (若都沒抓到)
-    return "🏢 **投資級公司債 (Investment Grade)**", f"此債券由 **{name}** 發行。屬於投資等級信貸資產，通常具備一定規模的營運基礎與償債能力。建議進一步參閱公開說明書或信評報告以了解個別風險。"
+    if portfolio.empty: return "N/A"
+    try:
+        # 加權平均分數
+        w_avg_score = (portfolio['Credit_Score'] * portfolio['Weight']).sum()
+        # 四捨五入取整數
+        rounded_score = int(round(w_avg_score))
+        # 查表找回文字 (若超出範圍則顯示 B- 或更低)
+        return score_to_rating_map.get(rounded_score, 'B-')
+    except:
+        return "N/A"
 
 def standardize_frequency(val):
     s = str(val).strip().upper()
-    s = s.replace('每半年', 'SEMI').replace('半年', 'SEMI')
-    if any(x in s for x in ['SEMI', 'HALF']): return '半年配'
+    if any(x in s for x in ['半年', 'SEMI', 'HALF']): return '半年配'
     if any(x in s for x in ['季', 'QUARTER', 'Q']): return '季配'
     if any(x in s for x in ['月', 'MONTH']): return '月配'
     if any(x in s for x in ['年', 'YEAR', 'ANNUAL']): return '年配'
@@ -182,7 +126,6 @@ def clean_data(file):
 
         df = df.rename(columns=col_mapping)
         
-        # 信評偵測
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -479,8 +422,7 @@ if uploaded_file:
                 portfolio = run_cash_flow_strategy(df_clean, allow_dup, freq_type)
 
         if not portfolio.empty:
-            st.divider()
-            
+            # === 全域資料準備 ===
             portfolio['Allocation %'] = (portfolio['Weight'] * 100).round(1)
             price_col = 'Original_Price' if 'Original_Price' in portfolio.columns else 'Implied_Price'
             portfolio['Final_Price'] = portfolio[price_col].fillna(100)
@@ -493,20 +435,89 @@ if uploaded_file:
             else:
                 portfolio['Annual_Coupon_Amt'] = portfolio['Invested_Amount'] * (portfolio['YTM'] / 100)
             
-            avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
-            total_coupon = portfolio['Annual_Coupon_Amt'].sum()
-            avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
-            avg_duration = (portfolio['Calc_Mod_Duration'] * portfolio['Weight']).sum()
+            # --- 現金流詳細資料準備 ---
+            months = list(range(1, 13))
+            cash_flow_summary = [0] * 12
+            cf_details = [] 
             
-            k1, k2, k3, k4 = st.columns(4)
+            for idx, row in portfolio.iterrows():
+                f_raw = str(row.get('Frequency', '')).upper()
+                freq_val = standardize_frequency(f_raw)
+                coupon_amt = row['Annual_Coupon_Amt']
+                m = int(row['Pay_Month']) if 'Pay_Month' in row else np.random.randint(1,7)
+                m_idx = m - 1
+                
+                pay_months = []
+                per_pay = 0
+                
+                if freq_val == '月配':
+                    per_pay = coupon_amt / 12
+                    pay_months = list(range(12))
+                elif freq_val == '季配':
+                    per_pay = coupon_amt / 4
+                    pay_months = [(m_idx + i*3) % 12 for i in range(4)]
+                elif freq_val == '年配':
+                    per_pay = coupon_amt
+                    pay_months = [m_idx]
+                else: # 半年配
+                    per_pay = coupon_amt / 2
+                    pay_months = [m_idx, (m_idx + 6) % 12]
+                
+                for pm in pay_months:
+                    cash_flow_summary[pm] += per_pay
+                    cf_details.append({
+                        '債券名稱': row['Name'],
+                        '配息月份': f"{pm+1}月",
+                        '配息金額': round(per_pay, 0)
+                    })
+            
+            cf_df = pd.DataFrame({'Month': [f"{i}月" for i in months], 'Amount': cash_flow_summary})
+            cf_detail_df = pd.DataFrame(cf_details).sort_values(by=['配息月份', '債券名稱'])
+
+            # --- 風險資料準備 ---
+            avg_duration = (portfolio['Calc_Mod_Duration'] * portfolio['Weight']).sum()
+            avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
+            total_coupon = portfolio['Annual_Coupon_Amt'].sum()
+            
+            scenarios = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+            res_risk = []
+            for shock in scenarios:
+                market_val = portfolio['Face_Value_Bought'].sum() * (avg_price/100)
+                cap_gain = -1 * avg_duration * (shock/100) * market_val
+                income = total_coupon
+                total_ret = cap_gain + income
+                cap_gain_pct = (cap_gain / investment_amt) * 100
+                total_ret_pct = (total_ret / investment_amt) * 100
+                res_risk.append({'情境': f"利率{shock:+}%", '資本損益': cap_gain, '資本漲跌幅': f"{cap_gain_pct:.2f}%", '利息收入': income, '總報酬': total_ret, '總報酬漲跌幅': f"{total_ret_pct:.2f}%"})
+            df_risk = pd.DataFrame(res_risk)
+
+            # --- 顯示 KPI ---
+            st.divider()
+            avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
+            
+            # 【新增】計算平均信評
+            avg_rating_str = get_weighted_average_rating(portfolio)
+
+            k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("預期年化殖利率", f"{avg_ytm:.2f}%")
-            k2.metric("投資組合存續期間", f"{avg_duration:.2f} 年")
+            k2.metric("平均存續期間", f"{avg_duration:.2f} 年")
             k3.metric("預估年領總息", f"${total_coupon:,.0f}")
             k4.metric("平均買入價格", f"${avg_price:.2f}")
+            k5.metric("平均信用評等", avg_rating_str)
 
             c1, c2 = st.columns([5, 5])
             with c1:
                 st.subheader("📋 建議清單")
+                # Excel 下載
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    portfolio.to_excel(writer, index=False, sheet_name='建議清單')
+                    cf_df.to_excel(writer, index=False, sheet_name='現金流試算')
+                    cf_detail_df.to_excel(writer, index=False, sheet_name='配息明細')
+                    df_risk.to_excel(writer, index=False, sheet_name='風險壓力測試')
+                processed_data = output.getvalue()
+                st.download_button(label="📥 下載完整報表 (含清單/明細/風險測試)", data=processed_data, file_name='bond_analysis_report.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
                 cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'Calc_Mod_Duration', 'Allocation %', 'Annual_Coupon_Amt']
                 if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
                 if 'Implied_Price' in portfolio.columns: cols.insert(4, 'Implied_Price')
@@ -522,12 +533,21 @@ if uploaded_file:
                 if '預估年息' in display_df.columns: display_df['預估年息'] = display_df['預估年息'].map('{:,.0f}'.format)
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 
-                # --- 新增：發行機構簡介卡 ---
-                st.markdown("### 🏦 投資組合發行機構速覽 (AI Profile)")
-                unique_issuers = portfolio['Name'].unique()
-                for issuer in unique_issuers:
-                    title, desc = get_issuer_profile(issuer)
-                    st.info(f"{title}\n\n{desc}")
+                # --- 新增：投資組合健康度 (Pie Charts) ---
+                st.markdown("### 📊 投資組合健康度 (Portfolio Health)")
+                p1, p2 = st.columns(2)
+                with p1:
+                    fig_rating = px.pie(portfolio, names='Rating_Source', values='Weight', title='信評分佈 (Credit Rating)')
+                    st.plotly_chart(fig_rating, use_container_width=True)
+                with p2:
+                    # 取前5大 Issuer
+                    issuer_weights = portfolio.groupby('Name')['Weight'].sum().reset_index().sort_values('Weight', ascending=False)
+                    if len(issuer_weights) > 5:
+                        top5 = issuer_weights.head(5)
+                        others = pd.DataFrame([{'Name': 'Others', 'Weight': issuer_weights.iloc[5:]['Weight'].sum()}])
+                        issuer_weights = pd.concat([top5, others])
+                    fig_issuer = px.pie(issuer_weights, names='Name', values='Weight', title='發行機構分佈 (Top 5 Issuers)')
+                    st.plotly_chart(fig_issuer, use_container_width=True)
 
             with c2:
                 if strategy == "相對價值":
@@ -567,57 +587,17 @@ if uploaded_file:
 
                 with my_tabs[1]:
                     st.caption("預估每月入帳金額 (稅前)")
-                    months = list(range(1, 13))
-                    cash_flow = [0] * 12
-                    for idx, row in portfolio.iterrows():
-                        f_raw = str(row.get('Frequency', '')).upper()
-                        freq_val = standardize_frequency(f_raw)
-                        coupon_amt = row['Annual_Coupon_Amt']
-                        m = int(row['Pay_Month']) if 'Pay_Month' in row else np.random.randint(1,7)
-                        m_idx = m - 1
-                        if freq_val == '月配':
-                            per_pay = coupon_amt / 12
-                            for i in range(12): cash_flow[i] += per_pay
-                        elif freq_val == '季配':
-                            per_pay = coupon_amt / 4
-                            for i in range(4): cash_flow[(m_idx + i*3) % 12] += per_pay
-                        elif freq_val == '年配':
-                            cash_flow[m_idx] += coupon_amt
-                        else: 
-                            per_pay = coupon_amt / 2
-                            cash_flow[m_idx] += per_pay
-                            cash_flow[(m_idx + 6) % 12] += per_pay
-                            
-                    cf_df = pd.DataFrame({'Month': [f"{i}月" for i in months], 'Amount': cash_flow})
                     fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title=f"本金 ${investment_amt:,.0f} 之現金流模擬")
                     fig_cf.update_traces(marker_color='#2ecc71')
                     st.plotly_chart(fig_cf, use_container_width=True)
+                    
+                    with st.expander("查看詳細配息日曆 (Payment Calendar)"):
+                        st.dataframe(cf_detail_df, use_container_width=True)
                 
                 with my_tabs[2]:
                     st.caption(f"使用 **修正存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析")
-                    scenarios = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
-                    res_risk = []
-                    for shock in scenarios:
-                        market_val = portfolio['Face_Value_Bought'].sum() * (avg_price/100)
-                        cap_gain = -1 * avg_duration * (shock/100) * market_val
-                        income = total_coupon
-                        total_ret = cap_gain + income
-                        cap_gain_pct = (cap_gain / investment_amt) * 100
-                        total_ret_pct = (total_ret / investment_amt) * 100
-                        res_risk.append({
-                            '情境': f"利率{shock:+}%", 
-                            '資本損益': cap_gain, 
-                            '資本漲跌幅': f"{cap_gain_pct:.2f}%",
-                            '利息收入': income, 
-                            '總報酬': total_ret,
-                            '總報酬漲跌幅': f"{total_ret_pct:.2f}%"
-                        })
-                    
-                    df_risk = pd.DataFrame(res_risk)
                     fig_risk = go.Figure()
-                    
                     text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
-                    
                     fig_risk.add_trace(go.Bar(
                         x=df_risk['情境'], y=df_risk['資本損益'], 
                         name='資本損益 (不含息)', 
