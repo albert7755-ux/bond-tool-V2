@@ -6,9 +6,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
+import io
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (機構情報版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V25.0 智慧情報版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -18,7 +19,7 @@ st.markdown("""
 3. **槓鈴策略**：自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:purple'>★ New Feature: 新增「發行機構簡介卡」，自動分析機構背景與信評亮點。</span>
+<span style='color:purple'>★ Intelligence: 內建「智慧產業識別引擎」，精準提供各類股債券之投資屬性與風險提示。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -33,34 +34,82 @@ rating_map = {
 
 def get_issuer_profile(name):
     """
-    簡易的關鍵字對應資料庫，模擬機構簡介
+    智慧產業識別引擎 (Smart Industry Recognizer)
+    透過關鍵字匹配，提供更精準的機構簡介與風險提示。
     """
     n = str(name).upper()
     
-    if 'TREASURY' in n or 'GOVT' in n or '美國公債' in n:
-        return "🇺🇸 **美國公債 (US Treasury)**", "全球無風險資產定價錨，流動性最高，信用風險極低，適合做為核心資產配置的防禦部位。"
+    # 1. 國家主權 (Sovereign)
+    if any(x in n for x in ['TREASURY', 'GOVT', 'UNITED STATES', '美國公債']):
+        return "🇺🇸 **美國公債 (US Treasury)**", "【無風險資產】全球金融資產定價錨，流動性最佳。雖收益率低於公司債，但具備最高的資本保護力，適合做為投資組合的核心防禦部位。"
     
-    if any(x in n for x in ['GOLDMAN', 'GS', '高盛']):
-        return "🏦 **高盛證券 (Goldman Sachs)**", "全球頂尖投資銀行，被視為系統重要性金融機構 (G-SIB)。獲利能力強，但受資本市場波動影響較大，適合追求高票息的投資人。"
+    # 2. 金融銀行業 (Banking - G-SIBs)
+    if any(x in n for x in ['GOLDMAN', 'GS', 'MORGAN STANLEY', 'MS ', 'JPM', 'CHASE', 'CITI', 'BANK OF AMERICA', 'BAC', 'WELLS FARGO', 'HSBC', 'UBS', 'BARCLAYS', 'BNP', 'DEUTSCHE', 'SANTANDER']):
+        return "🏦 **全球系統性銀行 (G-SIBs)**", "【金融核心】受巴塞爾協定與聯準會嚴格監管，資本適足率高，違約風險極低。此類債券流動性極佳，且通常提供比公債更好的信用利差。"
     
-    if any(x in n for x in ['MORGAN', 'MS', 'JPM', 'CITI', 'BOA', 'BAC', 'WELLS']):
-        return "🏦 **美國大型銀行 (US Major Banks)**", "屬全球系統性重要銀行，受聯準會嚴格監管，資本適足率高。債券流動性佳，是投資等級債的主流標的。"
-    
-    if any(x in n for x in ['APPLE', 'AAPL', 'MICROSOFT', 'MSFT', 'GOOGLE', 'AMAZON']):
-        return "💻 **美國科技巨頭 (Big Tech)**", "擁有龐大現金流與極強的護城河，信用評等通常極高 (AA~AAA)，違約風險極低，適合保守型長線投資人。"
-    
-    if any(x in n for x in ['AT&T', 'VERIZON', 'T-MOBILE']):
-        return "📡 **電信龍頭 (Telecom)**", "現金流穩定，屬防禦型產業。雖然負債比率通常較高，但營運模式具備公用事業特性，配息穩定。"
-    
-    if 'HSBC' in n:
-        return "🌏 **滙豐控股 (HSBC)**", "全球佈局的英系銀行，在新興市場與亞洲業務佔比高，受地緣政治與全球貿易影響較大。"
+    if any(x in n for x in ['CAPITAL ONE', 'AMERICAN EXPRESS', 'ALLY', 'SYNCHRONY']):
+        return "💳 **消費金融與信用卡 (Consumer Finance)**", "【循環信貸】業務高度依賴消費者支出與就業數據。在經濟擴張期獲利強勁，但在衰退期壞帳風險可能上升，波動度略高於傳統銀行。"
 
-    # 預設回傳
-    return "🏢 **投資級公司債 (IG Corp)**", "該發行機構為投資等級企業，具備一定規模之營運基礎。建議參閱公開說明書以了解詳細財務狀況。"
+    if any(x in n for x in ['BERKSHIRE', 'ALLIANZ', 'AXA', 'METLIFE', 'PRUDENTIAL', 'AIG']):
+        return "☂️ **保險與波克夏 (Insurance / Conglomerate)**", "【長線資金】保險業擁有龐大的浮存金，投資風格穩健保守。波克夏(Berkshire Hathaway)則具備極強的資產負債表，信用評等極高。"
+
+    # 3. 科技巨頭 (Big Tech)
+    if any(x in n for x in ['APPLE', 'AAPL', 'MICROSOFT', 'MSFT', 'GOOGLE', 'ALPHABET', 'AMAZON', 'META', 'FACEBOOK']):
+        return "💻 **科技巨頭 (Big Tech)**", "【現金牛】擁有全球最強勁的資產負債表與現金流，護城河極深。其信用風險極低，常被視為「類公債」的高級企業債，適合保守投資人。"
+    
+    if any(x in n for x in ['INTEL', 'NVIDIA', 'AMD', 'QUALCOMM', 'TSMC', 'BROADCOM', 'MICRON', 'TEXAS INSTRUMENT']):
+        return "💾 **半導體晶片 (Semiconductor)**", "【成長週期】產業受景氣循環與庫存週期影響較大，但受惠於 AI 與數位化趨勢，長期成長動能強。需留意資本支出(Capex)對現金流的影響。"
+    
+    if any(x in n for x in ['ORACLE', 'IBM', 'CISCO', 'SALESFORCE', 'ADOBE']):
+        return "☁️ **軟體與企業服務 (Enterprise Tech)**", "【訂閱經濟】營收模式多為訂閱制，現金流相對穩定可預測。屬於成熟科技股，波動度通常低於硬體股。"
+
+    # 4. 通訊電信 (Telecom)
+    if any(x in n for x in ['AT&T', 'VERIZON', 'T-MOBILE', 'VODAFONE', 'ORANGE', 'TELEFONICA']):
+        return "📡 **電信運營商 (Telecom)**", "【高息防禦】典型的防禦型板塊，營運模式類似公用事業，現金流非常穩定。特徵是負債比率通常較高(因5G建設)，但擁有穩定的配息能力。"
+
+    # 5. 醫療保健 (Healthcare)
+    if any(x in n for x in ['PFIZER', 'JOHNSON', 'J&J', 'MERCK', 'ABBVIE', 'BRISTOL', 'GILIAD', 'AMGEN', 'ASTRAZENECA']):
+        return "💊 **製藥與生技 (Pharma & Biotech)**", "【抗衰退】醫療需求缺乏彈性，受景氣波動影響小。大型藥廠擁有專利護城河與強大現金流，是高品質的防禦性投資標的。"
+    
+    if any(x in n for x in ['UNITEDHEALTH', 'CVS', 'CIGNA', 'ELEVANCE']):
+        return "🏥 **醫療保險與服務 (Managed Care)**", "【剛性需求】受惠於人口老化與醫療支出增加，營運穩健。需留意政府醫療政策(如藥價談判)對毛利率的潛在影響。"
+
+    # 6. 能源與原物料 (Energy & Materials)
+    if any(x in n for x in ['EXXON', 'CHEVRON', 'SHELL', 'BP', 'TOTAL', 'CONOCO', 'OCCIDENTAL']):
+        return "🛢️ **綜合能源巨頭 (Integrated Energy)**", "【油價連動】獲利與原油價格高度相關。大型能源公司歷經景氣循環考驗，致力於去槓桿與配息，現金流產生能力極強。"
+    
+    if any(x in n for x in ['RIO TINTO', 'BHP', 'VALE', 'FREEPORT']):
+        return "⛏️ **礦業與原物料 (Mining & Materials)**", "【通膨對沖】屬於景氣循環股，在通膨時期通常表現較佳。債券價格易受大宗商品價格與中國需求波動影響。"
+
+    # 7. 汽車與工業 (Auto & Industrial)
+    if any(x in n for x in ['FORD', 'GENERAL MOTORS', 'GM', 'TOYOTA', 'HONDA', 'VOLKSWAGEN', 'BMW', 'MERCEDES']):
+        return "🚗 **汽車製造 (Automobile)**", "【循環消費】受景氣與利率影響大，且屬重資產行業。傳統車廠正面臨電動車轉型支出壓力，部分公司信評可能位於 BBB 邊緣，需關注現金流狀況。"
+    
+    if any(x in n for x in ['BOEING', 'LOCKHEED', 'RAYTHEON', 'NORTHROP', 'GENERAL DYNAMICS']):
+        return "✈️ **航太與國防 (Aerospace & Defense)**", "【地緣政治】受惠於國防預算增加與地緣政治緊張。多為政府長期合約，營收能見度高，具備獨特的避險屬性。"
+    
+    if any(x in n for x in ['CATERPILLAR', 'DEERE', '3M', 'HONEYWELL', 'GE']):
+        return "🏗️ **工業巨頭 (Industrial)**", "【經濟櫥窗】與全球經濟成長率高度連動。這些公司通常歷史悠久，信評穩健，是投資等級債的重要組成部分。"
+
+    # 8. 必需消費 (Consumer Staples)
+    if any(x in n for x in ['COCA', 'PEPSI', 'MCDONALD', 'STARBUCKS', 'WALMART', 'COSTCO', 'PROCTER', 'PG', 'NESTLE']):
+        return "🛒 **必需消費與零售 (Consumer Staples)**", "【抗通膨】擁有強大品牌定價權，能將通膨成本轉嫁給消費者。無論景氣好壞，民眾皆需消費，故債券表現極為抗跌。"
+
+    # 9. 公用事業 (Utilities)
+    if any(x in n for x in ['DUKE', 'SOUTHERN', 'DOMINION', 'NEXTERA', 'PACIFIC GAS', 'EDISON']):
+        return "⚡ **公用事業 (Utilities)**", "【特許行業】受政府監管，擁有區域壟斷地位。營收與現金流極度穩定，類似「類債券」股票，是追求穩定收益的首選板塊。"
+
+    # 10. 媒體與娛樂
+    if any(x in n for x in ['DISNEY', 'NETFLIX', 'COMCAST', 'WARNER']):
+        return "🎬 **媒體與娛樂 (Media)**", "【內容為王】現金流取決於訂閱戶數與廣告收入。串流媒體競爭激烈，需關注其內容製作成本與負債比率的變化。"
+
+    # 預設回傳 (若都沒抓到)
+    return "🏢 **投資級公司債 (Investment Grade)**", f"此債券由 **{name}** 發行。屬於投資等級信貸資產，通常具備一定規模的營運基礎與償債能力。建議進一步參閱公開說明書或信評報告以了解個別風險。"
 
 def standardize_frequency(val):
     s = str(val).strip().upper()
-    if any(x in s for x in ['半年', 'SEMI', 'HALF']): return '半年配'
+    s = s.replace('每半年', 'SEMI').replace('半年', 'SEMI')
+    if any(x in s for x in ['SEMI', 'HALF']): return '半年配'
     if any(x in s for x in ['季', 'QUARTER', 'Q']): return '季配'
     if any(x in s for x in ['月', 'MONTH']): return '月配'
     if any(x in s for x in ['年', 'YEAR', 'ANNUAL']): return '年配'
@@ -133,6 +182,7 @@ def clean_data(file):
 
         df = df.rename(columns=col_mapping)
         
+        # 信評偵測
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -473,7 +523,7 @@ if uploaded_file:
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 
                 # --- 新增：發行機構簡介卡 ---
-                st.markdown("### 🏦 投資組合發行機構速覽")
+                st.markdown("### 🏦 投資組合發行機構速覽 (AI Profile)")
                 unique_issuers = portfolio['Name'].unique()
                 for issuer in unique_issuers:
                     title, desc = get_issuer_profile(issuer)
