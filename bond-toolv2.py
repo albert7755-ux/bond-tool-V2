@@ -5,10 +5,11 @@ from scipy.optimize import linprog, curve_fit
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import re
 import io
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V21.0 列印增強版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V22.0 下載修復版)", layout="wide")
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -18,7 +19,7 @@ st.markdown("""
 3. **槓鈴策略**：<span style='color:blue'>★ Custom</span> 自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:orange'>★ Print Ready: 新增「下載 Excel 報表」功能，方便排版列印 A4 紙。</span>
+<span style='color:red'>★ Fixed: 修復 Excel 下載功能 (改用 openpyxl 引擎)。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -429,19 +430,16 @@ if uploaded_file:
 
             c1, c2 = st.columns([5, 5])
             with c1:
-                # === 下載 Excel 按鈕 ===
                 st.subheader("📋 建議清單")
                 
-                # 準備要下載的 DataFrame
+                # --- 下載按鈕 (修復版: 使用 openpyxl) ---
                 output_df = portfolio.copy()
-                # 轉換為 Excel in memory
                 output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     output_df.to_excel(writer, index=False, sheet_name='Bond_Portfolio')
                 processed_data = output.getvalue()
-                
                 st.download_button(
-                    label="📥 下載 Excel 報表 (列印用)",
+                    label="📥 下載 Excel 報表",
                     data=processed_data,
                     file_name='bond_portfolio_report.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -550,7 +548,6 @@ if uploaded_file:
                     df_risk = pd.DataFrame(res_risk)
                     fig_risk = go.Figure()
                     
-                    # 智慧調整文字位置：負值(outside), 正值(inside)
                     text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
                     
                     fig_risk.add_trace(go.Bar(
