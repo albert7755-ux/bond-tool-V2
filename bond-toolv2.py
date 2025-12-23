@@ -7,9 +7,12 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
 import io
+import os
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V27.0 平均信評版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V31.0 原始存續期間版)", layout="wide")
+
+SHARED_DATA_PATH = "public_bond_quotes.xlsx"
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -19,12 +22,11 @@ st.markdown("""
 3. **槓鈴策略**：自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:brown'>★ New Metric: 新增「平均信用評等 (Weighted Average Rating)」計算功能。</span>
+<span style='color:green'>★ Optimization: 風險分析直接採用您上傳的「存續期間 (Duration)」欄位，不再進行後台試算，確保數據一致性。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
 # --- 2. 輔助函式 ---
-# 分數對照表 (越小越好)
 rating_map = {
     'AAA': 1, 'AA+': 2, 'AA': 3, 'AA-': 4,
     'A+': 5, 'A': 6, 'A-': 7,
@@ -33,23 +35,15 @@ rating_map = {
     'B+': 14, 'B': 15, 'B-': 16
 }
 
-# 【新增】反向對照表 (分數轉文字)
-score_to_rating_map = {v: k for k, v in rating_map.items()}
-
-def get_weighted_average_rating(portfolio):
-    """
-    計算加權平均信評
-    """
-    if portfolio.empty: return "N/A"
-    try:
-        # 加權平均分數
-        w_avg_score = (portfolio['Credit_Score'] * portfolio['Weight']).sum()
-        # 四捨五入取整數
-        rounded_score = int(round(w_avg_score))
-        # 查表找回文字 (若超出範圍則顯示 B- 或更低)
-        return score_to_rating_map.get(rounded_score, 'B-')
-    except:
-        return "N/A"
+def get_clean_issuer(name):
+    s = str(name).upper()
+    s = re.sub(r'\b20[2-9][0-9]\b', '', s)
+    s = re.sub(r'\d+(\.\d+)?%', '', s)
+    s = re.sub(r'\d{1,2}/\d{1,2}', '', s)
+    s = re.sub(r'\b(USD|EUR|AUD|CNY)\b', '', s)
+    s = re.sub(r'\b(CORP|INC|LTD|PLC|SA|CO)\b', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
 
 def standardize_frequency(val):
     s = str(val).strip().upper()
@@ -65,67 +59,65 @@ def excel_date_to_datetime(serial):
     except:
         return None
 
-def calculate_duration_and_price(row, override_ytm=None):
+# 只保留用於計算「理論價格」的功能，風險計算不使用此函數的 Duration
+def calculate_implied_price(row, override_ytm=None):
     try:
         ytm_val = override_ytm if override_ytm is not None else row['YTM']
         ytm = ytm_val / 100
-        
         coupon_rate = row.get('Coupon', row['YTM']) / 100 
         years = row['Years_Remaining']
         
         freq_std = standardize_frequency(row.get('Frequency', '半年配'))
-        freq_map = {'月配': 12, '季配': 4, '半年配': 2, '年配': 1}
-        k = freq_map.get(freq_std, 2)
+        k = 12 if freq_std == '月配' else 4 if freq_std == '季配' else 1 if freq_std == '年配' else 2
         
         n = int(years * k)
-        if n <= 0: return 100.0, 0.0
+        if n <= 0: return 100.0
         
         coupon_amt = 100 * coupon_rate / k
         r_period = ytm / k
         
         pv_sum = 0
-        weighted_time_sum = 0
-        
         for t in range(1, n + 1):
             df = 1 / ((1 + r_period) ** t)
             cf = coupon_amt if t < n else (coupon_amt + 100)
-            pv = cf * df
-            pv_sum += pv
-            weighted_time_sum += (t / k) * pv
+            pv_sum += cf * df
             
-        price = pv_sum
-        if price == 0:
-            mac_duration = 0
-        else:
-            mac_duration = weighted_time_sum / price
-        mod_duration = mac_duration / (1 + r_period)
-        
-        return round(price, 4), round(mod_duration, 4)
+        return round(pv_sum, 4)
     except:
-        return 100.0, 0.0
+        return 100.0
 
 @st.cache_data
-def clean_data(file):
+def clean_data(file_source):
     try:
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
+        is_path = isinstance(file_source, str)
+        if is_path:
+            if file_source.endswith('.csv'): df = pd.read_csv(file_source)
+            else: df = pd.read_excel(file_source, engine='openpyxl')
         else:
-            df = pd.read_excel(file, engine='openpyxl')
+            if file_source.name.endswith('.csv'): df = pd.read_csv(file_source)
+            else: df = pd.read_excel(file_source, engine='openpyxl')
             
         col_mapping = {}
+        # 1. 先抓 ISIN, Name, YTM 等基礎欄位
         for col in df.columns:
             c_clean = str(col).replace('\n', '').replace(' ', '').upper()
             if 'ISIN' in c_clean or '債券代號' in c_clean: col_mapping[col] = 'ISIN'
             elif '債券名稱' in c_clean: col_mapping[col] = 'Name'
             elif 'YTM' in c_clean or 'YTC' in c_clean: col_mapping[col] = 'YTM'
-            elif '剩餘' in c_clean or '年期' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'Years_Remaining'
             elif '到期日' in c_clean or 'MATURITY' in c_clean: col_mapping[col] = 'Maturity'
             elif '頻率' in c_clean or 'FREQ' in c_clean: col_mapping[col] = 'Frequency'
             elif '票面' in c_clean or 'COUPON' in c_clean: col_mapping[col] = 'Coupon'
             elif 'OFFERPRICE' in c_clean or '價格' in c_clean: col_mapping[col] = 'Original_Price'
+            
+            # 【關鍵修正】分開抓「剩餘年期」與「存續期間」
+            # 優先抓存續期間
+            elif '存續' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'User_Duration'
+            # 再抓剩餘年期
+            elif '剩餘' in c_clean or '年期' in c_clean or 'YEARS' in c_clean: col_mapping[col] = 'Years_Remaining'
 
         df = df.rename(columns=col_mapping)
         
+        # 信評偵測
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -153,6 +145,7 @@ def clean_data(file):
             try: float(df['YTM'].iloc[0])
             except: df = df.iloc[1:].reset_index(drop=True)
 
+        # 檢查必要欄位
         req_cols = ['ISIN', 'Name', 'YTM', 'Years_Remaining']
         if not all(c in df.columns for c in req_cols):
             return None, f"缺少必要欄位: {req_cols}"
@@ -162,6 +155,13 @@ def clean_data(file):
         if 'Coupon' in df.columns: df['Coupon'] = pd.to_numeric(df['Coupon'], errors='coerce')
         if 'Original_Price' in df.columns: df['Original_Price'] = pd.to_numeric(df['Original_Price'], errors='coerce')
         
+        # 處理使用者提供的 Duration
+        if 'User_Duration' in df.columns:
+            df['User_Duration'] = pd.to_numeric(df['User_Duration'], errors='coerce')
+        else:
+            # 如果真的沒有提供，只好暫時用剩餘年期頂替 (fallback)
+            df['User_Duration'] = df['Years_Remaining']
+
         df = df.dropna(subset=['YTM', 'Years_Remaining'])
         df = df[df['YTM'] > 0] 
 
@@ -180,9 +180,10 @@ def clean_data(file):
         if 'Frequency' in df.columns: df['Frequency'] = df['Frequency'].apply(standardize_frequency)
         else: df['Frequency'] = '半年配'
 
-        res = df.apply(lambda r: calculate_duration_and_price(r), axis=1)
-        df['Implied_Price'] = res.apply(lambda x: x[0])
-        df['Calc_Mod_Duration'] = res.apply(lambda x: x[1])
+        df['Issuer_Clean'] = df['Name'].apply(get_clean_issuer)
+
+        # 這裡只算價格，Duration 直接用讀進來的 User_Duration
+        df['Implied_Price'] = df.apply(lambda r: calculate_implied_price(r), axis=1)
 
         if 'Original_Price' not in df.columns:
             df['Original_Price'] = df['Implied_Price']
@@ -210,7 +211,6 @@ def clean_data(file):
         return None, str(e)
 
 # --- 3. 策略邏輯 ---
-
 def fit_yield_curve(x, a, b):
     return a + b * np.log(x)
 
@@ -228,7 +228,7 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
             p = np.poly1d(z)
             df_calc['Fair_YTM'] = p(df_calc['Years_Remaining'])
 
-    df_calc['Fair_Price'] = df_calc.apply(lambda row: calculate_duration_and_price(row, override_ytm=row['Fair_YTM'])[0], axis=1)
+    df_calc['Fair_Price'] = df_calc.apply(lambda row: calculate_implied_price(row, override_ytm=row['Fair_YTM']), axis=1)
     df_calc['Valuation_Gap'] = df_calc['Fair_Price'] - df_calc['Original_Price']
 
     pool = df_calc[df_calc['Years_Remaining'] >= min_dur]
@@ -242,11 +242,12 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
     count = 0
     for idx, row in pool.iterrows():
         if count >= top_n: break
-        if allow_dup or (row['Name'] not in used_issuers):
+        issuer_key = row['Issuer_Clean'] if 'Issuer_Clean' in row else row['Name']
+        if allow_dup or (issuer_key not in used_issuers):
             bond = row.copy()
             bond['Weight'] = weight_per_bond
             selected.append(bond)
-            used_issuers.add(row['Name'])
+            used_issuers.add(issuer_key)
             count += 1
             
     if selected: return pd.DataFrame(selected), df_calc
@@ -273,11 +274,12 @@ def run_ladder(df, steps, allow_dup, num_bonds):
     for (min_d, max_d) in steps:
         pool = df[(df['Years_Remaining'] >= min_d) & (df['Years_Remaining'] < max_d)].sort_values('YTM', ascending=False)
         for idx, row in pool.iterrows():
-            if allow_dup or (row['Name'] not in used_issuers):
+            issuer_key = row['Issuer_Clean']
+            if allow_dup or (issuer_key not in used_issuers):
                 best_bond = row.copy()
                 best_bond['Weight'] = weight_per_step
                 selected.append(best_bond)
-                used_issuers.add(row['Name'])
+                used_issuers.add(issuer_key)
                 break
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
@@ -288,25 +290,24 @@ def run_barbell(df, short_limit, long_limit, long_weight, allow_dup, total_bonds
     selected, used_issuers = [], set()
     num_short = int(total_bonds / 2)
     num_long = total_bonds - num_short
-    
     short_picks = []
     for idx, row in short_pool.iterrows():
         if len(short_picks) >= num_short: break
-        if allow_dup or (row['Name'] not in used_issuers):
+        issuer_key = row['Issuer_Clean']
+        if allow_dup or (issuer_key not in used_issuers):
             row = row.copy()
             row['Weight'] = (1 - long_weight) / num_short
             short_picks.append(row)
-            used_issuers.add(row['Name'])
-    
+            used_issuers.add(issuer_key)
     long_picks = []
     for idx, row in long_pool.iterrows():
         if len(long_picks) >= num_long: break
-        if allow_dup or (row['Name'] not in used_issuers):
+        issuer_key = row['Issuer_Clean']
+        if allow_dup or (issuer_key not in used_issuers):
             row = row.copy()
             row['Weight'] = long_weight / num_long
             long_picks.append(row)
-            used_issuers.add(row['Name'])
-    
+            used_issuers.add(issuer_key)
     final_list = short_picks + long_picks
     if final_list: return pd.DataFrame(final_list)
     return pd.DataFrame()
@@ -318,37 +319,75 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
     elif freq_type == "雙月配 (6次/年)": target_months = [1, 3, 5]
     else: target_months = [1, 4]
     weight_per_bond = 1.0 / len(target_months)
-    
     df['Pay_Cycle'] = df['Pay_Month'].apply(lambda x: x if x <= 6 else x - 6)
-    
     for cycle in target_months:
         pool = df[df['Pay_Cycle'] == cycle].sort_values('YTM', ascending=False)
         found = False
         for idx, row in pool.iterrows():
-            if allow_dup or (row['Name'] not in used_issuers):
+            issuer_key = row['Issuer_Clean']
+            if allow_dup or (issuer_key not in used_issuers):
                 bond = row.copy()
                 bond['Weight'] = weight_per_bond
                 bond['Cycle_Str'] = f"{cycle}月 & {cycle+6}月" 
                 selected.append(bond)
-                used_issuers.add(row['Name'])
+                used_issuers.add(issuer_key)
                 found = True
                 break
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
 
+score_to_rating_map = {v: k for k, v in rating_map.items()}
+def get_weighted_average_rating(portfolio):
+    if portfolio.empty: return "N/A"
+    try:
+        w_avg_score = (portfolio['Credit_Score'] * portfolio['Weight']).sum()
+        rounded_score = int(round(w_avg_score))
+        return score_to_rating_map.get(rounded_score, 'B-')
+    except:
+        return "N/A"
+
 # --- 4. 主程式 UI ---
 
-st.subheader("📂 步驟 1: 請先上傳債券清單")
-uploaded_file = st.file_uploader("支援銀行 Excel / CSV 格式", type=['xlsx', 'csv'])
+st.sidebar.header("📂 步驟 1: 資料來源")
+has_public_file = os.path.exists(SHARED_DATA_PATH)
+file_to_process = None
+df_raw = None
+use_admin_mode = st.sidebar.checkbox("我是管理員 (更新公用檔)")
 
-if uploaded_file:
-    df_raw, err = clean_data(uploaded_file)
+if use_admin_mode:
+    st.sidebar.warning("⚠️ 管理員模式：上傳檔案將會覆蓋現有的公用報價！")
+    uploaded_file = st.sidebar.file_uploader("上傳新報價檔 (Excel/CSV)", type=['xlsx', 'csv'])
+    if uploaded_file:
+        if st.sidebar.button("💾 確認更新並覆蓋公用檔"):
+            try:
+                if uploaded_file.name.endswith('.csv'): df_temp = pd.read_csv(uploaded_file)
+                else: df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
+                df_temp.to_excel(SHARED_DATA_PATH, index=False)
+                st.sidebar.success("✅ 公用報價檔已更新！請重新整理網頁。")
+                st.rerun() 
+            except Exception as e:
+                st.sidebar.error(f"更新失敗: {e}")
+    if has_public_file and not uploaded_file:
+        file_to_process = SHARED_DATA_PATH
+else:
+    if has_public_file:
+        mod_time = datetime.fromtimestamp(os.path.getmtime(SHARED_DATA_PATH)).strftime('%Y-%m-%d %H:%M')
+        st.sidebar.success(f"✅ 已載入公用報價資料庫\n\n📅 更新時間: {mod_time}")
+        file_to_process = SHARED_DATA_PATH
+    else:
+        st.sidebar.info("目前沒有公用報價檔，請先自行上傳。")
+        uploaded_file = st.sidebar.file_uploader("上傳個人報價檔", type=['xlsx', 'csv'])
+        if uploaded_file:
+            file_to_process = uploaded_file
+
+if file_to_process:
+    df_raw, err = clean_data(file_to_process)
+    
     if err:
         st.error(f"錯誤: {err}")
     else:
-        st.success(f"✅ 成功讀取 {len(df_raw)} 檔債券資料！")
-        
         st.sidebar.header("🧠 步驟 2: 策略設定")
+        
         all_issuers = sorted(df_raw['Name'].astype(str).unique())
         excluded_issuers = st.sidebar.multiselect("🚫 黑名單 (剔除機構)", options=all_issuers)
         if excluded_issuers:
@@ -367,7 +406,6 @@ if uploaded_file:
             allow_dup = st.sidebar.checkbox("允許機構重複?", value=True)
 
         portfolio = pd.DataFrame()
-        df_with_alpha = pd.DataFrame() 
 
         if strategy == "收益最大化":
             t_dur = st.sidebar.slider("剩餘年期上限", 2.0, 30.0, 10.0)
@@ -414,7 +452,7 @@ if uploaded_file:
             
             if st.sidebar.button("🚀 計算", type="primary"):
                 df_t = df_clean[df_clean['Rating_Source'].isin(target_rating)] if target_rating else df_clean
-                portfolio, df_with_alpha = run_relative_value(df_t, allow_dup, top_n, min_dur, target_freqs)
+                portfolio, df_calc = run_relative_value(df_t, allow_dup, top_n, min_dur, target_freqs)
 
         elif strategy == "領息頻率組合":
             freq_type = st.sidebar.selectbox("目標領息頻率", ["月月配 (12次/年)", "雙月配 (6次/年)", "季季配 (4次/年)"])
@@ -422,11 +460,9 @@ if uploaded_file:
                 portfolio = run_cash_flow_strategy(df_clean, allow_dup, freq_type)
 
         if not portfolio.empty:
-            # === 全域資料準備 ===
             portfolio['Allocation %'] = (portfolio['Weight'] * 100).round(1)
             price_col = 'Original_Price' if 'Original_Price' in portfolio.columns else 'Implied_Price'
             portfolio['Final_Price'] = portfolio[price_col].fillna(100)
-            
             portfolio['Invested_Amount'] = investment_amt * portfolio['Weight']
             portfolio['Face_Value_Bought'] = portfolio['Invested_Amount'] / (portfolio['Final_Price'] / 100)
             
@@ -435,11 +471,9 @@ if uploaded_file:
             else:
                 portfolio['Annual_Coupon_Amt'] = portfolio['Invested_Amount'] * (portfolio['YTM'] / 100)
             
-            # --- 現金流詳細資料準備 ---
             months = list(range(1, 13))
             cash_flow_summary = [0] * 12
             cf_details = [] 
-            
             for idx, row in portfolio.iterrows():
                 f_raw = str(row.get('Frequency', '')).upper()
                 freq_val = standardize_frequency(f_raw)
@@ -449,7 +483,6 @@ if uploaded_file:
                 
                 pay_months = []
                 per_pay = 0
-                
                 if freq_val == '月配':
                     per_pay = coupon_amt / 12
                     pay_months = list(range(12))
@@ -459,30 +492,32 @@ if uploaded_file:
                 elif freq_val == '年配':
                     per_pay = coupon_amt
                     pay_months = [m_idx]
-                else: # 半年配
+                else: 
                     per_pay = coupon_amt / 2
                     pay_months = [m_idx, (m_idx + 6) % 12]
                 
                 for pm in pay_months:
                     cash_flow_summary[pm] += per_pay
-                    cf_details.append({
-                        '債券名稱': row['Name'],
-                        '配息月份': f"{pm+1}月",
-                        '配息金額': round(per_pay, 0)
-                    })
+                    cf_details.append({'債券名稱': row['Name'], '配息月份': f"{pm+1}月", '配息金額': round(per_pay, 0)})
             
             cf_df = pd.DataFrame({'Month': [f"{i}月" for i in months], 'Amount': cash_flow_summary})
             cf_detail_df = pd.DataFrame(cf_details).sort_values(by=['配息月份', '債券名稱'])
 
-            # --- 風險資料準備 ---
-            avg_duration = (portfolio['Calc_Mod_Duration'] * portfolio['Weight']).sum()
+            # --- 風險試算 (使用 User_Duration) ---
+            # 【關鍵】直接使用讀取的 User_Duration (如果有的話)
+            if 'User_Duration' in portfolio.columns:
+                avg_duration = (portfolio['User_Duration'] * portfolio['Weight']).sum()
+            else:
+                # 萬一真的沒有，用 Years_Remaining 頂替，但理論上前面 clean_data 已經處理過了
+                avg_duration = (portfolio['Years_Remaining'] * portfolio['Weight']).sum()
+
             avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
             total_coupon = portfolio['Annual_Coupon_Amt'].sum()
-            
             scenarios = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
             res_risk = []
             for shock in scenarios:
                 market_val = portfolio['Face_Value_Bought'].sum() * (avg_price/100)
+                # 使用 User_Duration 計算
                 cap_gain = -1 * avg_duration * (shock/100) * market_val
                 income = total_coupon
                 total_ret = cap_gain + income
@@ -491,11 +526,8 @@ if uploaded_file:
                 res_risk.append({'情境': f"利率{shock:+}%", '資本損益': cap_gain, '資本漲跌幅': f"{cap_gain_pct:.2f}%", '利息收入': income, '總報酬': total_ret, '總報酬漲跌幅': f"{total_ret_pct:.2f}%"})
             df_risk = pd.DataFrame(res_risk)
 
-            # --- 顯示 KPI ---
             st.divider()
             avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
-            
-            # 【新增】計算平均信評
             avg_rating_str = get_weighted_average_rating(portfolio)
 
             k1, k2, k3, k4, k5 = st.columns(5)
@@ -508,7 +540,6 @@ if uploaded_file:
             c1, c2 = st.columns([5, 5])
             with c1:
                 st.subheader("📋 建議清單")
-                # Excel 下載
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     portfolio.to_excel(writer, index=False, sheet_name='建議清單')
@@ -518,14 +549,14 @@ if uploaded_file:
                 processed_data = output.getvalue()
                 st.download_button(label="📥 下載完整報表 (含清單/明細/風險測試)", data=processed_data, file_name='bond_analysis_report.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-                cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'Calc_Mod_Duration', 'Allocation %', 'Annual_Coupon_Amt']
+                cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'User_Duration', 'Allocation %', 'Annual_Coupon_Amt']
                 if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
                 if 'Implied_Price' in portfolio.columns: cols.insert(4, 'Implied_Price')
                 portfolio['Display_Gap'] = portfolio['Implied_Price'] - portfolio['Original_Price']
                 cols.insert(5, 'Display_Gap')
                 if 'Frequency' in portfolio.columns: cols.append('Frequency')
                 if 'Cycle_Str' in portfolio.columns: cols.insert(1, 'Cycle_Str')
-                rename_dict = {'Original_Price': '銀行報價 (Offer)', 'Implied_Price': '理論價格 (Theoretical)', 'Display_Gap': '價差 (Gap)', 'Years_Remaining': '剩餘年期', 'Calc_Mod_Duration': '存續期間 (Dur)', 'Annual_Coupon_Amt': '預估年息', 'Rating_Source': '信評', 'Cycle_Str': '配息月份'}
+                rename_dict = {'Original_Price': '銀行報價 (Offer)', 'Implied_Price': '理論價格 (Theoretical)', 'Display_Gap': '價差 (Gap)', 'Years_Remaining': '剩餘年期', 'User_Duration': '存續期間 (Dur)', 'Annual_Coupon_Amt': '預估年息', 'Rating_Source': '信評', 'Cycle_Str': '配息月份'}
                 final_cols = [c for c in cols if c in portfolio.columns]
                 display_df = portfolio[final_cols].rename(columns=rename_dict).copy()
                 for c in ['銀行報價 (Offer)', '理論價格 (Theoretical)', '價差 (Gap)', '剩餘年期', '存續期間 (Dur)']:
@@ -533,20 +564,20 @@ if uploaded_file:
                 if '預估年息' in display_df.columns: display_df['預估年息'] = display_df['預估年息'].map('{:,.0f}'.format)
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 
-                # --- 新增：投資組合健康度 (Pie Charts) ---
-                st.markdown("### 📊 投資組合健康度 (Portfolio Health)")
+                st.markdown("### 📊 投資組合健康度")
                 p1, p2 = st.columns(2)
                 with p1:
-                    fig_rating = px.pie(portfolio, names='Rating_Source', values='Weight', title='信評分佈 (Credit Rating)')
+                    fig_rating = px.pie(portfolio, names='Rating_Source', values='Weight', title='信評分佈')
                     st.plotly_chart(fig_rating, use_container_width=True)
                 with p2:
-                    # 取前5大 Issuer
-                    issuer_weights = portfolio.groupby('Name')['Weight'].sum().reset_index().sort_values('Weight', ascending=False)
+                    if 'Issuer_Clean' in portfolio.columns: pie_col = 'Issuer_Clean'
+                    else: pie_col = 'Name'
+                    issuer_weights = portfolio.groupby(pie_col)['Weight'].sum().reset_index().sort_values('Weight', ascending=False)
                     if len(issuer_weights) > 5:
                         top5 = issuer_weights.head(5)
-                        others = pd.DataFrame([{'Name': 'Others', 'Weight': issuer_weights.iloc[5:]['Weight'].sum()}])
+                        others = pd.DataFrame([{pie_col: 'Others', 'Weight': issuer_weights.iloc[5:]['Weight'].sum()}])
                         issuer_weights = pd.concat([top5, others])
-                    fig_issuer = px.pie(issuer_weights, names='Name', values='Weight', title='發行機構分佈 (Top 5 Issuers)')
+                    fig_issuer = px.pie(issuer_weights, names=pie_col, values='Weight', title='發行機構分佈 (Smart Grouping)')
                     st.plotly_chart(fig_issuer, use_container_width=True)
 
             with c2:
@@ -590,12 +621,12 @@ if uploaded_file:
                     fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title=f"本金 ${investment_amt:,.0f} 之現金流模擬")
                     fig_cf.update_traces(marker_color='#2ecc71')
                     st.plotly_chart(fig_cf, use_container_width=True)
-                    
-                    with st.expander("查看詳細配息日曆 (Payment Calendar)"):
+                    with st.expander("查看詳細配息日曆"):
                         st.dataframe(cf_detail_df, use_container_width=True)
                 
                 with my_tabs[2]:
-                    st.caption(f"使用 **修正存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析")
+                    # 【文字更新】顯示使用使用者存續期間
+                    st.caption(f"使用 **平均存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析 (基於原始資料)")
                     fig_risk = go.Figure()
                     text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
                     fig_risk.add_trace(go.Bar(
@@ -610,11 +641,8 @@ if uploaded_file:
                     fig_risk.update_layout(barmode='relative', title="利率敏感度分析 (含漲跌幅 %)")
                     st.plotly_chart(fig_risk, use_container_width=True)
 
-        elif uploaded_file and st.session_state.get('last_run'):
-            st.warning("⚠️ 找不到符合條件的債券。")
-
 else:
-    st.info("👆 請在上方上傳您的債券清單 Excel 檔以開始分析。")
+    st.info("👆 請在上方選擇「公用報價檔」或「上傳新檔案」以開始分析。")
 
 st.markdown("---")
 st.markdown("""
@@ -624,6 +652,6 @@ st.markdown("""
     2. 債券價格、殖利率與配息金額均會隨市場波動，實際交易價格與條件請以銀行當下報價為準。<br>
     3. 投資人應自行評估風險承受能力，並詳閱公開說明書。外幣投資需自行承擔匯率風險。<br>
     4. 本系統之理論價格與價差分析僅為數學模型推估，非市場實際成交價格。<br>
-    5. 本系統之風險試算採用後台推導之「修正存續期間 (Modified Duration)」進行估算。
+    5. 本系統之風險試算採用您上傳之「存續期間」進行估算。
 </div>
 """, unsafe_allow_html=True)
