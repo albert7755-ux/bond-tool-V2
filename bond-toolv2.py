@@ -8,11 +8,18 @@ from datetime import datetime, timedelta
 import re
 import io
 import os
+import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V31.0 原始存續期間版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V32.0 更新優化版)", layout="wide")
 
 SHARED_DATA_PATH = "public_bond_quotes.xlsx"
+
+# --- 【修正】檢查是否剛更新完，如果是，彈出成功通知 ---
+if 'update_success' in st.session_state and st.session_state['update_success']:
+    st.toast('🎉 公用報價檔已成功更新！', icon='✅')
+    # 顯示完後清除狀態，避免每次重整都跳
+    del st.session_state['update_success']
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
@@ -22,7 +29,7 @@ st.markdown("""
 3. **槓鈴策略**：自訂總檔數。
 4. **相對價值**：專注於價差分析 (Bar Chart)。
 5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:green'>★ Optimization: 風險分析直接採用您上傳的「存續期間 (Duration)」欄位，不再進行後台試算，確保數據一致性。</span>
+<span style='color:green'>★ Update: 優化檔案上傳反饋，新增更新成功彈出視窗 (Toast)。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -86,7 +93,7 @@ def calculate_implied_price(row, override_ytm=None):
     except:
         return 100.0
 
-@st.cache_data
+@st.cache_data(ttl=5) # 加入 TTL 快取，避免讀到舊檔案
 def clean_data(file_source):
     try:
         is_path = isinstance(file_source, str)
@@ -109,10 +116,8 @@ def clean_data(file_source):
             elif '票面' in c_clean or 'COUPON' in c_clean: col_mapping[col] = 'Coupon'
             elif 'OFFERPRICE' in c_clean or '價格' in c_clean: col_mapping[col] = 'Original_Price'
             
-            # 【關鍵修正】分開抓「剩餘年期」與「存續期間」
-            # 優先抓存續期間
+            # 分開抓「剩餘年期」與「存續期間」
             elif '存續' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'User_Duration'
-            # 再抓剩餘年期
             elif '剩餘' in c_clean or '年期' in c_clean or 'YEARS' in c_clean: col_mapping[col] = 'Years_Remaining'
 
         df = df.rename(columns=col_mapping)
@@ -145,7 +150,6 @@ def clean_data(file_source):
             try: float(df['YTM'].iloc[0])
             except: df = df.iloc[1:].reset_index(drop=True)
 
-        # 檢查必要欄位
         req_cols = ['ISIN', 'Name', 'YTM', 'Years_Remaining']
         if not all(c in df.columns for c in req_cols):
             return None, f"缺少必要欄位: {req_cols}"
@@ -159,7 +163,6 @@ def clean_data(file_source):
         if 'User_Duration' in df.columns:
             df['User_Duration'] = pd.to_numeric(df['User_Duration'], errors='coerce')
         else:
-            # 如果真的沒有提供，只好暫時用剩餘年期頂替 (fallback)
             df['User_Duration'] = df['Years_Remaining']
 
         df = df.dropna(subset=['YTM', 'Years_Remaining'])
@@ -354,25 +357,41 @@ file_to_process = None
 df_raw = None
 use_admin_mode = st.sidebar.checkbox("我是管理員 (更新公用檔)")
 
+# --- 【修正】管理員上傳邏輯 ---
 if use_admin_mode:
     st.sidebar.warning("⚠️ 管理員模式：上傳檔案將會覆蓋現有的公用報價！")
     uploaded_file = st.sidebar.file_uploader("上傳新報價檔 (Excel/CSV)", type=['xlsx', 'csv'])
+    
+    # 增加一個按鈕，讓上傳動作更明確
     if uploaded_file:
-        if st.sidebar.button("💾 確認更新並覆蓋公用檔"):
-            try:
-                if uploaded_file.name.endswith('.csv'): df_temp = pd.read_csv(uploaded_file)
-                else: df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
-                df_temp.to_excel(SHARED_DATA_PATH, index=False)
-                st.sidebar.success("✅ 公用報價檔已更新！請重新整理網頁。")
-                st.rerun() 
-            except Exception as e:
-                st.sidebar.error(f"更新失敗: {e}")
+        if st.sidebar.button("💾 確認更新並覆蓋"):
+            with st.spinner("⏳ 正在寫入公用資料庫..."):
+                try:
+                    # 讀取並轉存
+                    if uploaded_file.name.endswith('.csv'): df_temp = pd.read_csv(uploaded_file)
+                    else: df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
+                    
+                    df_temp.to_excel(SHARED_DATA_PATH, index=False)
+                    
+                    # 關鍵：設定 Session State 並重整
+                    st.session_state['update_success'] = True
+                    # 清除快取，確保 clean_data 會重讀新檔
+                    clean_data.clear()
+                    st.rerun() 
+                    
+                except Exception as e:
+                    st.sidebar.error(f"更新失敗: {e}")
+
+    # 如果沒上傳，但有舊檔，也可以用舊檔測試
     if has_public_file and not uploaded_file:
         file_to_process = SHARED_DATA_PATH
 else:
+    # 一般使用者模式
     if has_public_file:
-        mod_time = datetime.fromtimestamp(os.path.getmtime(SHARED_DATA_PATH)).strftime('%Y-%m-%d %H:%M')
-        st.sidebar.success(f"✅ 已載入公用報價資料庫\n\n📅 更新時間: {mod_time}")
+        # 強制讀取當下時間，不使用 Cache
+        mod_timestamp = os.path.getmtime(SHARED_DATA_PATH)
+        mod_time = datetime.fromtimestamp(mod_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        st.sidebar.success(f"✅ 已載入公用報價資料庫\n\n📅 更新時間:\n{mod_time}")
         file_to_process = SHARED_DATA_PATH
     else:
         st.sidebar.info("目前沒有公用報價檔，請先自行上傳。")
@@ -504,11 +523,9 @@ if file_to_process:
             cf_detail_df = pd.DataFrame(cf_details).sort_values(by=['配息月份', '債券名稱'])
 
             # --- 風險試算 (使用 User_Duration) ---
-            # 【關鍵】直接使用讀取的 User_Duration (如果有的話)
             if 'User_Duration' in portfolio.columns:
                 avg_duration = (portfolio['User_Duration'] * portfolio['Weight']).sum()
             else:
-                # 萬一真的沒有，用 Years_Remaining 頂替，但理論上前面 clean_data 已經處理過了
                 avg_duration = (portfolio['Years_Remaining'] * portfolio['Weight']).sum()
 
             avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
