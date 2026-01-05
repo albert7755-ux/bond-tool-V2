@@ -11,25 +11,19 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V32.0 更新優化版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V33.0 自選組合版)", layout="wide")
 
 SHARED_DATA_PATH = "public_bond_quotes.xlsx"
 
-# --- 【修正】檢查是否剛更新完，如果是，彈出成功通知 ---
 if 'update_success' in st.session_state and st.session_state['update_success']:
     st.toast('🎉 公用報價檔已成功更新！', icon='✅')
-    # 顯示完後清除狀態，避免每次重整都跳
     del st.session_state['update_success']
 
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
 針對高資產客戶設計的策略模組：
-1. **收益最大化**：追求最高配息。
-2. **債券梯**：自訂年期與檔數。
-3. **槓鈴策略**：自訂總檔數。
-4. **相對價值**：專注於價差分析 (Bar Chart)。
-5. **領息頻率組合**：完整顯示 12 個月現金流。
-<span style='color:green'>★ Update: 優化檔案上傳反饋，新增更新成功彈出視窗 (Toast)。</span>
+1. **收益最大化**、**債券梯**、**槓鈴策略**、**相對價值**、**領息頻率組合**。
+2. <span style='color:blue'>**★ New: 自選組合** - 手動挑選特定債券，進行完整壓力測試與現金流分析。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -66,7 +60,6 @@ def excel_date_to_datetime(serial):
     except:
         return None
 
-# 只保留用於計算「理論價格」的功能，風險計算不使用此函數的 Duration
 def calculate_implied_price(row, override_ytm=None):
     try:
         ytm_val = override_ytm if override_ytm is not None else row['YTM']
@@ -93,7 +86,7 @@ def calculate_implied_price(row, override_ytm=None):
     except:
         return 100.0
 
-@st.cache_data(ttl=5) # 加入 TTL 快取，避免讀到舊檔案
+@st.cache_data(ttl=5)
 def clean_data(file_source):
     try:
         is_path = isinstance(file_source, str)
@@ -105,7 +98,6 @@ def clean_data(file_source):
             else: df = pd.read_excel(file_source, engine='openpyxl')
             
         col_mapping = {}
-        # 1. 先抓 ISIN, Name, YTM 等基礎欄位
         for col in df.columns:
             c_clean = str(col).replace('\n', '').replace(' ', '').upper()
             if 'ISIN' in c_clean or '債券代號' in c_clean: col_mapping[col] = 'ISIN'
@@ -115,14 +107,11 @@ def clean_data(file_source):
             elif '頻率' in c_clean or 'FREQ' in c_clean: col_mapping[col] = 'Frequency'
             elif '票面' in c_clean or 'COUPON' in c_clean: col_mapping[col] = 'Coupon'
             elif 'OFFERPRICE' in c_clean or '價格' in c_clean: col_mapping[col] = 'Original_Price'
-            
-            # 分開抓「剩餘年期」與「存續期間」
             elif '存續' in c_clean or 'DURATION' in c_clean: col_mapping[col] = 'User_Duration'
             elif '剩餘' in c_clean or '年期' in c_clean or 'YEARS' in c_clean: col_mapping[col] = 'Years_Remaining'
 
         df = df.rename(columns=col_mapping)
         
-        # 信評偵測
         rating_rename = {}
         rating_patterns = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-', 'AA1', 'AA2', 'A1', 'A2', 'BAA1']
         known_cols = list(col_mapping.values())
@@ -159,7 +148,6 @@ def clean_data(file_source):
         if 'Coupon' in df.columns: df['Coupon'] = pd.to_numeric(df['Coupon'], errors='coerce')
         if 'Original_Price' in df.columns: df['Original_Price'] = pd.to_numeric(df['Original_Price'], errors='coerce')
         
-        # 處理使用者提供的 Duration
         if 'User_Duration' in df.columns:
             df['User_Duration'] = pd.to_numeric(df['User_Duration'], errors='coerce')
         else:
@@ -185,7 +173,6 @@ def clean_data(file_source):
 
         df['Issuer_Clean'] = df['Name'].apply(get_clean_issuer)
 
-        # 這裡只算價格，Duration 直接用讀進來的 User_Duration
         df['Implied_Price'] = df.apply(lambda r: calculate_implied_price(r), axis=1)
 
         if 'Original_Price' not in df.columns:
@@ -357,38 +344,30 @@ file_to_process = None
 df_raw = None
 use_admin_mode = st.sidebar.checkbox("我是管理員 (更新公用檔)")
 
-# --- 【修正】管理員上傳邏輯 ---
 if use_admin_mode:
     st.sidebar.warning("⚠️ 管理員模式：上傳檔案將會覆蓋現有的公用報價！")
     uploaded_file = st.sidebar.file_uploader("上傳新報價檔 (Excel/CSV)", type=['xlsx', 'csv'])
     
-    # 增加一個按鈕，讓上傳動作更明確
     if uploaded_file:
         if st.sidebar.button("💾 確認更新並覆蓋"):
             with st.spinner("⏳ 正在寫入公用資料庫..."):
                 try:
-                    # 讀取並轉存
                     if uploaded_file.name.endswith('.csv'): df_temp = pd.read_csv(uploaded_file)
                     else: df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
                     
                     df_temp.to_excel(SHARED_DATA_PATH, index=False)
                     
-                    # 關鍵：設定 Session State 並重整
                     st.session_state['update_success'] = True
-                    # 清除快取，確保 clean_data 會重讀新檔
                     clean_data.clear()
                     st.rerun() 
                     
                 except Exception as e:
                     st.sidebar.error(f"更新失敗: {e}")
 
-    # 如果沒上傳，但有舊檔，也可以用舊檔測試
     if has_public_file and not uploaded_file:
         file_to_process = SHARED_DATA_PATH
 else:
-    # 一般使用者模式
     if has_public_file:
-        # 強制讀取當下時間，不使用 Cache
         mod_timestamp = os.path.getmtime(SHARED_DATA_PATH)
         mod_time = datetime.fromtimestamp(mod_timestamp).strftime('%Y-%m-%d %H:%M:%S')
         st.sidebar.success(f"✅ 已載入公用報價資料庫\n\n📅 更新時間:\n{mod_time}")
@@ -414,19 +393,42 @@ if file_to_process:
         else:
             df_clean = df_raw.copy()
 
+        # 新增 "自選組合" 選項
         strategy = st.sidebar.radio(
             "請選擇投資策略：",
-            ["收益最大化", "債券梯", "槓鈴策略", "相對價值", "領息頻率組合"]
+            ["收益最大化", "債券梯", "槓鈴策略", "相對價值", "領息頻率組合", "自選組合"]
         )
         
         investment_amt = st.sidebar.number_input("💰 投資本金 (元)", min_value=10000, value=1000000, step=100000)
         allow_dup = True
-        if strategy != "收益最大化":
+        if strategy not in ["收益最大化", "自選組合"]:
             allow_dup = st.sidebar.checkbox("允許機構重複?", value=True)
 
         portfolio = pd.DataFrame()
 
-        if strategy == "收益最大化":
+        # --- 新增：自選組合邏輯 ---
+        if strategy == "自選組合":
+            st.sidebar.info("👉 請從下方選單勾選您想要的債券")
+            # 製作顯示標籤：名稱 (ISIN) - YTM / 年期
+            df_clean['Select_Label'] = df_clean.apply(
+                lambda x: f"{x['Name']} ({x['ISIN']}) | YTM:{x['YTM']:.2f}% | {x['Years_Remaining']}年", axis=1
+            )
+            
+            picked_labels = st.sidebar.multiselect(
+                "選擇債券 (可搜尋)", 
+                options=df_clean['Select_Label'].unique(),
+                placeholder="輸入關鍵字或ISIN..."
+            )
+            
+            if st.sidebar.button("🚀 計算", type="primary"):
+                if picked_labels:
+                    portfolio = df_clean[df_clean['Select_Label'].isin(picked_labels)].copy()
+                    # 自選組合預設平均權重
+                    portfolio['Weight'] = 1.0 / len(portfolio)
+                else:
+                    st.warning("請至少選擇一檔債券！")
+
+        elif strategy == "收益最大化":
             t_dur = st.sidebar.slider("剩餘年期上限", 2.0, 30.0, 10.0)
             t_cred = rating_map[st.sidebar.select_slider("最低信評", list(rating_map.keys()), 'BBB')]
             max_w = st.sidebar.slider("單檔上限", 0.05, 0.5, 0.2)
@@ -522,7 +524,7 @@ if file_to_process:
             cf_df = pd.DataFrame({'Month': [f"{i}月" for i in months], 'Amount': cash_flow_summary})
             cf_detail_df = pd.DataFrame(cf_details).sort_values(by=['配息月份', '債券名稱'])
 
-            # --- 風險試算 (使用 User_Duration) ---
+            # --- 風險試算 ---
             if 'User_Duration' in portfolio.columns:
                 avg_duration = (portfolio['User_Duration'] * portfolio['Weight']).sum()
             else:
@@ -534,7 +536,6 @@ if file_to_process:
             res_risk = []
             for shock in scenarios:
                 market_val = portfolio['Face_Value_Bought'].sum() * (avg_price/100)
-                # 使用 User_Duration 計算
                 cap_gain = -1 * avg_duration * (shock/100) * market_val
                 income = total_coupon
                 total_ret = cap_gain + income
@@ -642,7 +643,6 @@ if file_to_process:
                         st.dataframe(cf_detail_df, use_container_width=True)
                 
                 with my_tabs[2]:
-                    # 【文字更新】顯示使用使用者存續期間
                     st.caption(f"使用 **平均存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析 (基於原始資料)")
                     fig_risk = go.Figure()
                     text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
