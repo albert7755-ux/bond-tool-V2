@@ -4,6 +4,7 @@ import numpy as np
 from scipy.optimize import linprog, curve_fit
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit.components.v1 as components # 用於顯示 TradingView
 from datetime import datetime, timedelta
 import re
 import io
@@ -11,7 +12,7 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V33.0 自選組合版)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V34.0)", layout="wide")
 
 SHARED_DATA_PATH = "public_bond_quotes.xlsx"
 
@@ -22,8 +23,9 @@ if 'update_success' in st.session_state and st.session_state['update_success']:
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
 針對高資產客戶設計的策略模組：
-1. **收益最大化**、**債券梯**、**槓鈴策略**、**相對價值**、**領息頻率組合**。
-2. <span style='color:blue'>**★ New: 自選組合** - 手動挑選特定債券，進行完整壓力測試與現金流分析。</span>
+1. **策略全餐**：收益最大化、債券梯、槓鈴、相對價值、現金流組合。
+2. <span style='color:blue'>**★ New: 自訂權重** - 針對自選組合，精確設定每一檔債券的投資比例。</span>
+3. <span style='color:blue'>**★ New: 機構透視** - 整合 TradingView，隨時查看發行機構基本面。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -85,6 +87,27 @@ def calculate_implied_price(row, override_ytm=None):
         return round(pv_sum, 4)
     except:
         return 100.0
+
+def show_tradingview_widget_zoomed(symbol):
+    """顯示放大 1.2 倍的 TradingView 機構簡介 (與 ELN 專案同款)"""
+    html_code = f"""
+    <div style="transform: scale(1.1); transform-origin: top left; width: 90%;">
+        <div class="tradingview-widget-container">
+          <div class="tradingview-widget-container__widget"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-profile.js" async>
+          {{
+          "width": "100%",
+          "height": "350",
+          "colorTheme": "light",
+          "isTransparent": false,
+          "symbol": "{symbol}",
+          "locale": "zh_TW"
+          }}
+          </script>
+        </div>
+    </div>
+    """
+    components.html(html_code, height=400)
 
 @st.cache_data(ttl=5)
 def clean_data(file_source):
@@ -393,7 +416,6 @@ if file_to_process:
         else:
             df_clean = df_raw.copy()
 
-        # 新增 "自選組合" 選項
         strategy = st.sidebar.radio(
             "請選擇投資策略：",
             ["收益最大化", "債券梯", "槓鈴策略", "相對價值", "領息頻率組合", "自選組合"]
@@ -405,13 +427,15 @@ if file_to_process:
             allow_dup = st.sidebar.checkbox("允許機構重複?", value=True)
 
         portfolio = pd.DataFrame()
+        
+        # 用於儲存自定義權重
+        custom_weights_map = {}
 
-        # --- 新增：自選組合邏輯 ---
+        # --- 自選組合 (含權重調整) ---
         if strategy == "自選組合":
             st.sidebar.info("👉 請從下方選單勾選您想要的債券")
-            # 製作顯示標籤：名稱 (ISIN) - YTM / 年期
             df_clean['Select_Label'] = df_clean.apply(
-                lambda x: f"{x['Name']} ({x['ISIN']}) | YTM:{x['YTM']:.2f}% | {x['Years_Remaining']}年", axis=1
+                lambda x: f"{x['Name']} ({x['ISIN']}) | YTM:{x['YTM']:.2f}%", axis=1
             )
             
             picked_labels = st.sidebar.multiselect(
@@ -420,11 +444,51 @@ if file_to_process:
                 placeholder="輸入關鍵字或ISIN..."
             )
             
+            # --- [新增] 權重調整 UI ---
+            if picked_labels:
+                st.sidebar.markdown("---")
+                st.sidebar.write("⚖️ **權重分配 (總和需為 100%)**")
+                
+                # 預設平均分配
+                default_w = 100.0 / len(picked_labels)
+                total_w_check = 0
+                
+                # 使用 container 讓輸入框整齊排列
+                for label in picked_labels:
+                    # 抓出債券名稱做為 label
+                    bond_name = label.split(' | ')[0]
+                    # 動態生成數字輸入框
+                    w_input = st.sidebar.number_input(
+                        f"{bond_name[:15]}...", 
+                        min_value=0.0, max_value=100.0, 
+                        value=default_w, step=1.0, 
+                        format="%.1f",
+                        key=f"w_{label}"
+                    )
+                    custom_weights_map[label] = w_input / 100.0
+                    total_w_check += w_input
+                
+                # 顯示總合檢查
+                if abs(total_w_check - 100.0) > 0.1:
+                    st.sidebar.error(f"⚠️ 目前總權重: {total_w_check:.1f}% (請調整至 100%)")
+                else:
+                    st.sidebar.success(f"✅ 總權重: {total_w_check:.1f}%")
+
             if st.sidebar.button("🚀 計算", type="primary"):
                 if picked_labels:
+                    # 1. 篩選出選中的債券
                     portfolio = df_clean[df_clean['Select_Label'].isin(picked_labels)].copy()
-                    # 自選組合預設平均權重
-                    portfolio['Weight'] = 1.0 / len(portfolio)
+                    
+                    # 2. 映射使用者輸入的權重
+                    # 注意：如果不做這步，排序可能會亂，所以用 map
+                    portfolio['Weight'] = portfolio['Select_Label'].map(custom_weights_map)
+                    
+                    # 3. 再次確認總權重 (雖然 UI 有擋，但程式邏輯也要防呆)
+                    w_sum = portfolio['Weight'].sum()
+                    if abs(w_sum - 1.0) > 0.001 and w_sum > 0:
+                        # 如果使用者沒調好，我們強制正規化 (Normalize)
+                        portfolio['Weight'] = portfolio['Weight'] / w_sum
+                        st.toast(f"已自動調整權重比例至 100% (原總合: {w_sum*100:.1f}%)", icon="⚖️")
                 else:
                     st.warning("請至少選擇一檔債券！")
 
@@ -599,10 +663,11 @@ if file_to_process:
                     st.plotly_chart(fig_issuer, use_container_width=True)
 
             with c2:
+                # 判斷是否顯示價差圖
                 if strategy == "相對價值":
-                    tabs_list = ["📊 潛在價差 (Spread)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試"]
+                    tabs_list = ["📊 潛在價差 (Spread)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試", "🏢 機構透視 (Profile)"]
                 else:
-                    tabs_list = ["📈 泡泡圖 (Scatter)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試"]
+                    tabs_list = ["📈 泡泡圖 (Scatter)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試", "🏢 機構透視 (Profile)"]
                 
                 my_tabs = st.tabs(tabs_list)
                 
@@ -657,6 +722,18 @@ if file_to_process:
                     fig_risk.add_trace(go.Scatter(x=df_risk['情境'], y=df_risk['總報酬'], name='總報酬 (含息)', mode='lines+markers+text', line=dict(color='gold', width=3), text=df_risk['總報酬漲跌幅'], textposition="top center"))
                     fig_risk.update_layout(barmode='relative', title="利率敏感度分析 (含漲跌幅 %)")
                     st.plotly_chart(fig_risk, use_container_width=True)
+                
+                # --- [新增] 機構透視頁籤 ---
+                with my_tabs[3]:
+                    st.info("💡 輸入股票代碼 (Ticker) 即可查看發行機構詳細資料。")
+                    col_input, col_view = st.columns([2, 5])
+                    with col_input:
+                        ticker_input = st.text_input("輸入股票代碼 (例: AAPL)", value="AAPL")
+                    
+                    with col_view:
+                        if ticker_input:
+                            st.caption(f"顯示 {ticker_input.upper()} 之機構簡介")
+                            show_tradingview_widget_zoomed(ticker_input)
 
 else:
     st.info("👆 請在上方選擇「公用報價檔」或「上傳新檔案」以開始分析。")
