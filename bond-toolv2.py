@@ -11,14 +11,12 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V35.0)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V36.0)", layout="wide")
 
 # ==========================================
 # 🔐 密碼保護機制
 # ==========================================
 def check_password():
-    """Returns `True` if the user had the correct password."""
-
     def password_entered():
         if st.session_state["password"] == "5428":
             st.session_state["password_correct"] = True
@@ -31,17 +29,13 @@ def check_password():
         return False
     elif not st.session_state["password_correct"]:
         st.text_input("請輸入系統密碼 (Access Code)", type="password", on_change=password_entered, key="password")
-        st.error("❌ 密碼錯誤 (Incorrect Password)")
+        st.error("❌ 密碼錯誤")
         return False
     else:
         return True
 
 if not check_password():
     st.stop()
-
-# ==========================================
-# 🔓 主程式開始
-# ==========================================
 
 SHARED_DATA_PATH = "public_bond_quotes.xlsx"
 
@@ -52,8 +46,8 @@ if 'update_success' in st.session_state and st.session_state['update_success']:
 st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
 針對高資產客戶設計的策略模組：
-1. **策略全餐**：收益最大化、債券梯、槓鈴、相對價值、現金流組合。
-2. <span style='color:blue'>**★ New: 自訂權重** - 針對自選組合，精確設定每一檔債券的投資比例。</span>
+1. **策略全餐**：收益最大化、債券梯、槓鈴、相對價值、現金流組合、自選組合。
+2. <span style='color:#E67E22'>**★ New: 蒙地卡羅模擬 (Monte Carlo)** - 模擬 1,000 種未來利率情境，計算極端風險 (VaR) 與資產分佈。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -238,7 +232,6 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
     df_calc = df[df['Years_Remaining'] > 0.1].copy()
     if len(df_calc) < 4:
         df_calc['Fair_YTM'] = df_calc['YTM'].mean()
-        st.warning("⚠️ 樣本數不足，改為使用平均值比較。")
     else:
         try:
             popt, _ = curve_fit(fit_yield_curve, df_calc['Years_Remaining'], df_calc['YTM'], maxfev=5000)
@@ -253,7 +246,6 @@ def run_relative_value(df, allow_dup, top_n, min_dur, target_freqs):
 
     pool = df_calc[df_calc['Years_Remaining'] >= min_dur]
     if target_freqs: pool = pool[pool['Frequency'].isin(target_freqs)]
-    
     pool = pool.sort_values('Valuation_Gap', ascending=False)
     
     selected = []
@@ -356,6 +348,71 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
 
+# --- 新增: 蒙地卡羅模擬函式 ---
+def run_monte_carlo_simulation(portfolio, investment_amt, simulations=1000, horizon_years=1):
+    """
+    執行蒙地卡羅模擬
+    假設:
+    1. 投資組合的 Duration 近似價格敏感度
+    2. 利率變動服從常態分佈
+    3. 報酬 = (Yield Income) + (Price Change due to Rate Shock)
+    """
+    if portfolio.empty:
+        return None
+
+    # 計算投資組合加權指標
+    if 'User_Duration' in portfolio.columns:
+        w_duration = (portfolio['User_Duration'] * portfolio['Weight']).sum()
+    else:
+        w_duration = (portfolio['Years_Remaining'] * portfolio['Weight']).sum()
+        
+    w_ytm = (portfolio['YTM'] * portfolio['Weight']).sum() / 100.0
+    
+    # 設定模擬參數
+    # 假設利率年波動率為 1% (即 100bps)，這是一個簡化假設
+    # 實務上應參考歷史利率波動率
+    rate_volatility = 0.01 
+    
+    np.random.seed(42)
+    
+    # 模擬 1000 種利率變動情境 (常態分佈)
+    # mean=0, std=rate_volatility
+    rate_shocks = np.random.normal(0, rate_volatility, simulations)
+    
+    results = []
+    
+    for shock in rate_shocks:
+        # 1. 資本利得/損失 (Price Return) ~= -Duration * Rate_Shock
+        price_return = -1 * w_duration * shock
+        
+        # 2. 利息收入 (Income Return) ~= YTM * Horizon
+        income_return = w_ytm * horizon_years
+        
+        # 3. 總報酬
+        total_return_pct = price_return + income_return
+        total_return_amt = investment_amt * total_return_pct
+        final_value = investment_amt + total_return_amt
+        
+        results.append({
+            'Rate_Shock_bps': shock * 10000,
+            'Total_Return_Pct': total_return_pct * 100,
+            'Final_Value': final_value
+        })
+        
+    df_sim = pd.DataFrame(results)
+    
+    # 計算統計數據
+    stats = {
+        'mean_return': df_sim['Total_Return_Pct'].mean(),
+        'median_return': df_sim['Total_Return_Pct'].median(),
+        'std_dev': df_sim['Total_Return_Pct'].std(),
+        'worst_5_pct': df_sim['Total_Return_Pct'].quantile(0.05), # 95% VaR
+        'best_5_pct': df_sim['Total_Return_Pct'].quantile(0.95),
+        'probability_loss': (df_sim['Total_Return_Pct'] < 0).mean() * 100
+    }
+    
+    return df_sim, stats
+
 score_to_rating_map = {v: k for k, v in rating_map.items()}
 def get_weighted_average_rating(portfolio):
     if portfolio.empty: return "N/A"
@@ -436,7 +493,6 @@ if file_to_process:
         portfolio = pd.DataFrame()
         custom_weights_map = {}
 
-        # --- 自選組合 (含權重調整) ---
         if strategy == "自選組合":
             st.sidebar.info("👉 請從下方選單勾選您想要的債券")
             df_clean['Select_Label'] = df_clean.apply(
@@ -452,10 +508,8 @@ if file_to_process:
             if picked_labels:
                 st.sidebar.markdown("---")
                 st.sidebar.write("⚖️ **權重分配 (總和需為 100%)**")
-                
                 default_w = 100.0 / len(picked_labels)
                 total_w_check = 0
-                
                 for label in picked_labels:
                     bond_name = label.split(' | ')[0]
                     w_input = st.sidebar.number_input(
@@ -469,7 +523,7 @@ if file_to_process:
                     total_w_check += w_input
                 
                 if abs(total_w_check - 100.0) > 0.1:
-                    st.sidebar.error(f"⚠️ 目前總權重: {total_w_check:.1f}% (請調整至 100%)")
+                    st.sidebar.error(f"⚠️ 目前總權重: {total_w_check:.1f}%")
                 else:
                     st.sidebar.success(f"✅ 總權重: {total_w_check:.1f}%")
 
@@ -477,11 +531,10 @@ if file_to_process:
                 if picked_labels:
                     portfolio = df_clean[df_clean['Select_Label'].isin(picked_labels)].copy()
                     portfolio['Weight'] = portfolio['Select_Label'].map(custom_weights_map)
-                    
                     w_sum = portfolio['Weight'].sum()
                     if abs(w_sum - 1.0) > 0.001 and w_sum > 0:
                         portfolio['Weight'] = portfolio['Weight'] / w_sum
-                        st.toast(f"已自動調整權重比例至 100% (原總合: {w_sum*100:.1f}%)", icon="⚖️")
+                        st.toast(f"已自動調整權重比例至 100%", icon="⚖️")
                 else:
                     st.warning("請至少選擇一檔債券！")
 
@@ -589,6 +642,8 @@ if file_to_process:
 
             avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
             total_coupon = portfolio['Annual_Coupon_Amt'].sum()
+            
+            # --- 原有的敏感度分析 ---
             scenarios = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
             res_risk = []
             for shock in scenarios:
@@ -600,6 +655,9 @@ if file_to_process:
                 total_ret_pct = (total_ret / investment_amt) * 100
                 res_risk.append({'情境': f"利率{shock:+}%", '資本損益': cap_gain, '資本漲跌幅': f"{cap_gain_pct:.2f}%", '利息收入': income, '總報酬': total_ret, '總報酬漲跌幅': f"{total_ret_pct:.2f}%"})
             df_risk = pd.DataFrame(res_risk)
+
+            # --- 蒙地卡羅模擬 ---
+            sim_df, sim_stats = run_monte_carlo_simulation(portfolio, investment_amt)
 
             st.divider()
             avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
@@ -656,15 +714,61 @@ if file_to_process:
                     st.plotly_chart(fig_issuer, use_container_width=True)
 
             with c2:
-                # 判斷是否顯示價差圖
-                if strategy == "相對價值":
-                    tabs_list = ["📊 潛在價差 (Spread)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試"]
-                else:
-                    tabs_list = ["📈 泡泡圖 (Scatter)", "💰 現金流 (Cash Flow)", "🛡️ 風險壓力測試"]
+                # 頁籤設定
+                tabs_list = ["🛡️ 風險壓力測試", "🎲 蒙地卡羅模擬", "💰 現金流", "📈 泡泡圖"]
+                if strategy == "相對價值": tabs_list[3] = "📊 潛在價差"
                 
                 my_tabs = st.tabs(tabs_list)
                 
+                # Tab 1: 傳統敏感度
                 with my_tabs[0]:
+                    st.caption(f"使用 **平均存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析")
+                    fig_risk = go.Figure()
+                    text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
+                    fig_risk.add_trace(go.Bar(
+                        x=df_risk['情境'], y=df_risk['資本損益'], 
+                        name='資本損益 (不含息)', 
+                        marker_color=['#e74c3c' if x < 0 else '#2ecc71' for x in df_risk['資本損益']], 
+                        text=df_risk['資本漲跌幅'], 
+                        textposition=text_positions
+                    ))
+                    fig_risk.add_trace(go.Bar(x=df_risk['情境'], y=df_risk['利息收入'], name='利息收入 (預估一年)', marker_color='#3498db'))
+                    fig_risk.add_trace(go.Scatter(x=df_risk['情境'], y=df_risk['總報酬'], name='總報酬 (含息)', mode='lines+markers+text', line=dict(color='gold', width=3), text=df_risk['總報酬漲跌幅'], textposition="top center"))
+                    fig_risk.update_layout(barmode='relative', title="利率敏感度分析 (含漲跌幅 %)")
+                    st.plotly_chart(fig_risk, use_container_width=True)
+
+                # Tab 2: 蒙地卡羅模擬
+                with my_tabs[1]:
+                    if sim_df is not None:
+                        st.caption("模擬 1000 次未來一年的利率情境，估算資產終值分佈。")
+                        
+                        # 顯示關鍵統計指標
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("平均預期報酬", f"{sim_stats['mean_return']:.2f}%")
+                        m2.metric("95% 信心水準 (VaR)", f"{sim_stats['worst_5_pct']:.2f}%", help="有 95% 的機率，報酬率不會低於此數值")
+                        m3.metric("虧損機率", f"{sim_stats['probability_loss']:.1f}%")
+                        
+                        # 繪製直方圖 (Histogram)
+                        fig_mc = px.histogram(sim_df, x="Total_Return_Pct", nbins=50, 
+                                              title="未來一年總報酬率分佈模擬",
+                                              labels={'Total_Return_Pct': '總報酬率 (%)'},
+                                              color_discrete_sequence=['#3498db'])
+                        
+                        # 加入 VaR 線
+                        fig_mc.add_vline(x=sim_stats['worst_5_pct'], line_dash="dash", line_color="red", annotation_text=f"95% VaR: {sim_stats['worst_5_pct']:.2f}%")
+                        st.plotly_chart(fig_mc, use_container_width=True)
+                    else:
+                        st.warning("無法執行模擬，請檢查投資組合數據。")
+
+                with my_tabs[2]:
+                    st.caption("預估每月入帳金額 (稅前)")
+                    fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title=f"本金 ${investment_amt:,.0f} 之現金流模擬")
+                    fig_cf.update_traces(marker_color='#2ecc71')
+                    st.plotly_chart(fig_cf, use_container_width=True)
+                    with st.expander("查看詳細配息日曆"):
+                        st.dataframe(cf_detail_df, use_container_width=True)
+                
+                with my_tabs[3]:
                     if strategy == "相對價值":
                         st.caption("顯示「理論價格 - 銀行報價」。**綠色柱狀越高，代表買入越划算 (低估)**。")
                         portfolio_sorted = portfolio.sort_values('Display_Gap', ascending=False)
@@ -692,30 +796,6 @@ if file_to_process:
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-                with my_tabs[1]:
-                    st.caption("預估每月入帳金額 (稅前)")
-                    fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title=f"本金 ${investment_amt:,.0f} 之現金流模擬")
-                    fig_cf.update_traces(marker_color='#2ecc71')
-                    st.plotly_chart(fig_cf, use_container_width=True)
-                    with st.expander("查看詳細配息日曆"):
-                        st.dataframe(cf_detail_df, use_container_width=True)
-                
-                with my_tabs[2]:
-                    st.caption(f"使用 **平均存續期間 ({avg_duration:.2f}年)** 進行利率敏感度分析 (基於原始資料)")
-                    fig_risk = go.Figure()
-                    text_positions = ['outside' if val < 0 else 'inside' for val in df_risk['資本損益']]
-                    fig_risk.add_trace(go.Bar(
-                        x=df_risk['情境'], y=df_risk['資本損益'], 
-                        name='資本損益 (不含息)', 
-                        marker_color=['#e74c3c' if x < 0 else '#2ecc71' for x in df_risk['資本損益']], 
-                        text=df_risk['資本漲跌幅'], 
-                        textposition=text_positions
-                    ))
-                    fig_risk.add_trace(go.Bar(x=df_risk['情境'], y=df_risk['利息收入'], name='利息收入 (預估一年)', marker_color='#3498db'))
-                    fig_risk.add_trace(go.Scatter(x=df_risk['情境'], y=df_risk['總報酬'], name='總報酬 (含息)', mode='lines+markers+text', line=dict(color='gold', width=3), text=df_risk['總報酬漲跌幅'], textposition="top center"))
-                    fig_risk.update_layout(barmode='relative', title="利率敏感度分析 (含漲跌幅 %)")
-                    st.plotly_chart(fig_risk, use_container_width=True)
-
 else:
     st.info("👆 請在上方選擇「公用報價檔」或「上傳新檔案」以開始分析。")
 
@@ -727,6 +807,7 @@ st.markdown("""
     2. 債券價格、殖利率與配息金額均會隨市場波動，實際交易價格與條件請以銀行當下報價為準。<br>
     3. 投資人應自行評估風險承受能力，並詳閱公開說明書。外幣投資需自行承擔匯率風險。<br>
     4. 本系統之理論價格與價差分析僅為數學模型推估，非市場實際成交價格。<br>
-    5. 本系統之風險試算採用您上傳之「存續期間」進行估算。
+    5. 本系統之風險試算採用您上傳之「存續期間」進行估算。<br>
+    6. 蒙地卡羅模擬假設未來利率變動服從常態分佈，僅供風險參考，無法預測實際市場黑天鵝事件。
 </div>
 """, unsafe_allow_html=True)
