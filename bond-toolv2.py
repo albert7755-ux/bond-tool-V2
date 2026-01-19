@@ -12,7 +12,7 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V37.0)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V38.0)", layout="wide")
 
 # ==========================================
 # 🔐 密碼保護機制
@@ -48,7 +48,7 @@ st.title("🛡️ 債券投資組合策略大師 Pro")
 st.markdown("""
 針對高資產客戶設計的策略模組：
 1. **策略全餐**：收益最大化、債券梯、槓鈴、相對價值、現金流組合、自選組合。
-2. <span style='color:#E67E22'>**★ New: 銷售賦能分析** - 蒙地卡羅模擬自動生成「獲利勝率」與「正向銷售話術」。</span>
+2. <span style='color:#E67E22'>**★ New: 時間複利模擬** - 自由調整持有年期，展示「時間如何化解風險」的獲利勝率。</span>
 """, unsafe_allow_html=True)
 st.divider()
 
@@ -370,7 +370,7 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
 
-# --- 蒙地卡羅模擬函式 ---
+# --- 蒙地卡羅模擬函式 (支援自訂年期) ---
 def run_monte_carlo_simulation(portfolio, investment_amt, simulations=1000, horizon_years=1):
     if portfolio.empty: return None
 
@@ -379,16 +379,27 @@ def run_monte_carlo_simulation(portfolio, investment_amt, simulations=1000, hori
     else:
         w_duration = (portfolio['Years_Remaining'] * portfolio['Weight']).sum()
         
+    # 計算平均年化殖利率
     w_ytm = (portfolio['YTM'] * portfolio['Weight']).sum() / 100.0
+    
+    # 假設利率年波動率
     rate_volatility = 0.01 
+    
     np.random.seed(42)
     rate_shocks = np.random.normal(0, rate_volatility, simulations)
     results = []
     
     for shock in rate_shocks:
+        # 1. 價格風險：-D * delta_y (雖然這是瞬間風險，但作為保守估計)
+        # 注意：實務上持有越久，Duration 會變短，這裡做簡化保守估計
         price_return = -1 * w_duration * shock
+        
+        # 2. 時間複利：YTM * 年數 (這是重點！時間越長，領息越多)
         income_return = w_ytm * horizon_years
+        
+        # 總報酬 = 價格變動 + 累積配息
         total_return_pct = price_return + income_return
+        
         total_return_amt = investment_amt * total_return_pct
         final_value = investment_amt + total_return_amt
         results.append({
@@ -433,10 +444,13 @@ if use_admin_mode:
                 try:
                     if uploaded_file.name.endswith('.csv'): df_temp = pd.read_csv(uploaded_file)
                     else: df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
+                    
                     df_temp.to_excel(SHARED_DATA_PATH, index=False)
+                    
                     st.session_state['update_success'] = True
                     clean_data.clear()
                     st.rerun() 
+                    
                 except Exception as e:
                     st.sidebar.error(f"更新失敗: {e}")
 
@@ -479,6 +493,11 @@ if file_to_process:
         if strategy not in ["收益最大化", "自選組合"]:
             allow_dup = st.sidebar.checkbox("允許機構重複?", value=True)
 
+        # --- 新增: 模擬年期滑桿 ---
+        st.sidebar.markdown("---")
+        st.sidebar.header("⏱️ 模擬設定")
+        horizon_years = st.sidebar.slider("預計持有年期 (年)", 1, 10, 1, help="拉長持有年期，通常能降低虧損機率並提高勝率。")
+
         portfolio = pd.DataFrame()
         custom_weights_map = {}
 
@@ -487,7 +506,12 @@ if file_to_process:
             df_clean['Select_Label'] = df_clean.apply(
                 lambda x: f"{x['Name']} ({x['ISIN']}) | YTM:{x['YTM']:.2f}%", axis=1
             )
-            picked_labels = st.sidebar.multiselect("選擇債券", options=df_clean['Select_Label'].unique())
+            
+            picked_labels = st.sidebar.multiselect(
+                "選擇債券 (可搜尋)", 
+                options=df_clean['Select_Label'].unique(),
+                placeholder="輸入關鍵字或ISIN..."
+            )
             
             if picked_labels:
                 st.sidebar.markdown("---")
@@ -496,7 +520,13 @@ if file_to_process:
                 total_w_check = 0
                 for label in picked_labels:
                     bond_name = label.split(' | ')[0]
-                    w_input = st.sidebar.number_input(f"{bond_name[:15]}...", 0.0, 100.0, default_w, 1.0, "%.1f", key=f"w_{label}")
+                    w_input = st.sidebar.number_input(
+                        f"{bond_name[:15]}...", 
+                        min_value=0.0, max_value=100.0, 
+                        value=default_w, step=1.0, 
+                        format="%.1f",
+                        key=f"w_{label}"
+                    )
                     custom_weights_map[label] = w_input / 100.0
                     total_w_check += w_input
                 
@@ -512,17 +542,17 @@ if file_to_process:
                     w_sum = portfolio['Weight'].sum()
                     if abs(w_sum - 1.0) > 0.001 and w_sum > 0:
                         portfolio['Weight'] = portfolio['Weight'] / w_sum
-                        st.toast(f"已自動調整權重", icon="⚖️")
+                        st.toast(f"已自動調整權重比例至 100%", icon="⚖️")
                 else:
                     st.warning("請至少選擇一檔債券！")
 
-        # 其他策略邏輯
         elif strategy == "收益最大化":
             t_dur = st.sidebar.slider("剩餘年期上限", 2.0, 30.0, 10.0)
             t_cred = rating_map[st.sidebar.select_slider("最低信評", list(rating_map.keys()), 'BBB')]
             max_w = st.sidebar.slider("單檔上限", 0.05, 0.5, 0.2)
             if st.sidebar.button("🚀 計算", type="primary"):
                 portfolio = run_max_yield(df_clean, t_dur, t_cred, max_w)
+
         elif strategy == "債券梯":
             ladder_mode = st.sidebar.radio("梯型模式", ["標準", "自訂"])
             if ladder_mode == "標準":
@@ -533,6 +563,7 @@ if file_to_process:
                 num_bonds = 3
             if st.sidebar.button("🚀 計算", type="primary"):
                 portfolio = run_ladder(df_clean, steps, allow_dup, num_bonds)
+
         elif strategy == "槓鈴策略":
             short_lim = st.sidebar.number_input("短債 < 年", 3.0)
             long_lim = st.sidebar.number_input("長債 > 年", 10.0)
@@ -540,11 +571,14 @@ if file_to_process:
             total_bonds = st.sidebar.slider("總檔數", 2, 20, 4)
             if st.sidebar.button("🚀 計算", type="primary"):
                 portfolio = run_barbell(df_clean, short_lim, long_lim, long_w, allow_dup, total_bonds)
+
         elif strategy == "相對價值":
             min_dur = st.sidebar.number_input("最低剩餘年期", 2.0)
             top_n = st.sidebar.slider("挑選幾檔", 3, 10, 5)
             if st.sidebar.button("🚀 計算", type="primary"):
-                portfolio, df_calc = run_relative_value(df_clean, allow_dup, top_n, min_dur, [])
+                df_t = df_clean[df_clean['Rating_Source'].isin(target_rating)] if target_rating else df_clean
+                portfolio, df_calc = run_relative_value(df_t, allow_dup, top_n, min_dur, target_freqs)
+
         elif strategy == "領息頻率組合":
             freq_type = st.sidebar.selectbox("目標", ["月月配 (12次/年)", "雙月配 (6次/年)", "季季配 (4次/年)"])
             if st.sidebar.button("🚀 計算", type="primary"):
@@ -562,20 +596,40 @@ if file_to_process:
             else:
                 portfolio['Annual_Coupon_Amt'] = portfolio['Invested_Amount'] * (portfolio['YTM'] / 100)
             
-            # 現金流計算 (簡化版)
+            months = list(range(1, 13))
             cash_flow_summary = [0] * 12
-            cf_details = []
+            cf_details = [] 
             for idx, row in portfolio.iterrows():
+                f_raw = str(row.get('Frequency', '')).upper()
+                freq_val = standardize_frequency(f_raw)
                 coupon_amt = row['Annual_Coupon_Amt']
-                # 簡單假設平分到 12 個月或特定月份
-                per_pay = coupon_amt / 2 # 假設半年配
-                m = np.random.randint(0,6)
-                cash_flow_summary[m] += per_pay
-                cash_flow_summary[m+6] += per_pay
-            cf_df = pd.DataFrame({'Month': [f"{i+1}月" for i in range(12)], 'Amount': cash_flow_summary})
+                m = int(row['Pay_Month']) if 'Pay_Month' in row else np.random.randint(1,7)
+                m_idx = m - 1
+                
+                pay_months = []
+                per_pay = 0
+                if freq_val == '月配':
+                    per_pay = coupon_amt / 12
+                    pay_months = list(range(12))
+                elif freq_val == '季配':
+                    per_pay = coupon_amt / 4
+                    pay_months = [(m_idx + i*3) % 12 for i in range(4)]
+                elif freq_val == '年配':
+                    per_pay = coupon_amt
+                    pay_months = [m_idx]
+                else: 
+                    per_pay = coupon_amt / 2
+                    pay_months = [m_idx, (m_idx + 6) % 12]
+                
+                for pm in pay_months:
+                    cash_flow_summary[pm] += per_pay
+                    cf_details.append({'債券名稱': row['Name'], '配息月份': f"{pm+1}月", '配息金額': round(per_pay, 0)})
+            
+            cf_df = pd.DataFrame({'Month': [f"{i}月" for i in months], 'Amount': cash_flow_summary})
+            cf_detail_df = pd.DataFrame(cf_details).sort_values(by=['配息月份', '債券名稱'])
 
-            # 蒙地卡羅模擬
-            sim_df, sim_stats = run_monte_carlo_simulation(portfolio, investment_amt)
+            # --- 風險試算 (蒙地卡羅) ---
+            sim_df, sim_stats = run_monte_carlo_simulation(portfolio, investment_amt, horizon_years=horizon_years)
 
             st.divider()
             avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
@@ -584,60 +638,100 @@ if file_to_process:
             k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("預期年化殖利率", f"{avg_ytm:.2f}%")
             k2.metric("平均信用評等", avg_rating_str)
-            k3.metric("預估年領總息", f"${portfolio['Annual_Coupon_Amt'].sum():,.0f}")
-            k4.metric("平均買入價格", f"${(portfolio['Final_Price'] * portfolio['Weight']).sum():.2f}")
+            k3.metric("預估年領總息", f"${total_coupon:,.0f}")
+            k4.metric("平均買入價格", f"${avg_price:.2f}")
             
-            # --- 關鍵的蒙地卡羅頁籤 ---
-            tabs = st.tabs(["🎲 蒙地卡羅模擬 (銷售賦能)", "💰 現金流", "📊 建議清單", "🏢 機構透視"])
-            
-            with tabs[0]:
-                if sim_df is not None:
-                    win_rate = 100 - sim_stats['probability_loss']
-                    upside = sim_stats['best_5_pct']
-                    
-                    # 1. 顯示三大獲利指標
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("🏆 獲利勝率", f"{win_rate:.1f}%", help="模擬結果中，正報酬的機率")
-                    m2.metric("📈 平均預期報酬", f"{sim_stats['mean_return']:.2f}%", help="模擬情境的平均值")
-                    m3.metric("🚀 潛在爆發力 (Upside)", f"+{upside:.2f}%", help="最好的 5% 情境下可達到的報酬")
-                    
-                    # 2. 自動生成銷售話術 (Sales Talk)
-                    st.success(f"""
-                    **💡 專業銷售觀點 (Sales Talk)：**
-                    根據大數據模擬 1,000 種市場情境，這筆投資組合展現了極佳的韌性與潛力：
-                    1.  **高勝率**：數據顯示，持有滿一年後，您有 **{win_rate:.1f}%** 的機率是獲利的（正報酬）。
-                    2.  **穩健收益**：在正常市場波動下，平均預期報酬約為 **{sim_stats['mean_return']:.2f}%**，這是結合配息與價格波動後的期望值。
-                    3.  **意外驚喜**：如果未來市場進入有利的降息循環，這筆投資甚至有 **5% 的機會** 創造高達 **{upside:.2f}%** 的年化報酬！
-                    
-                    *(註：極端風險 VaR 約為 {sim_stats['worst_5_pct']:.2f}%，僅發生在極少數惡劣市場環境)*
-                    """)
-                    
-                    # 3. 視覺化圖表
-                    fig_mc = px.histogram(sim_df, x="Total_Return_Pct", nbins=50, 
-                                          title="未來一年總報酬率分佈模擬 (右側為獲利區)",
-                                          labels={'Total_Return_Pct': '總報酬率 (%)'},
-                                          color_discrete_sequence=['#2ecc71']) # 用綠色代表賺錢
-                    fig_mc.add_vline(x=0, line_width=2, line_color="black") # 零軸
-                    st.plotly_chart(fig_mc, use_container_width=True)
+            c1, c2 = st.columns([5, 5])
+            with c1:
+                st.subheader("📋 建議清單")
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    portfolio.to_excel(writer, index=False, sheet_name='建議清單')
+                    cf_df.to_excel(writer, index=False, sheet_name='現金流試算')
+                    cf_detail_df.to_excel(writer, index=False, sheet_name='配息明細')
+                processed_data = output.getvalue()
+                st.download_button(label="📥 下載完整報表", data=processed_data, file_name='bond_analysis_report.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-            with tabs[1]:
-                fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title="預估現金流")
-                st.plotly_chart(fig_cf, use_container_width=True)
-
-            with tabs[2]:
-                st.dataframe(portfolio[['Name', 'ISIN', 'YTM', 'Weight', 'Allocation %', 'Annual_Coupon_Amt']], use_container_width=True)
+                cols = ['Name', 'Rating_Source', 'YTM', 'Years_Remaining', 'User_Duration', 'Allocation %', 'Annual_Coupon_Amt']
+                if 'Original_Price' in portfolio.columns: cols.insert(3, 'Original_Price')
+                if 'Implied_Price' in portfolio.columns: cols.insert(4, 'Implied_Price')
+                portfolio['Display_Gap'] = portfolio['Implied_Price'] - portfolio['Original_Price']
+                cols.insert(5, 'Display_Gap')
+                if 'Frequency' in portfolio.columns: cols.append('Frequency')
+                if 'Cycle_Str' in portfolio.columns: cols.insert(1, 'Cycle_Str')
+                rename_dict = {'Original_Price': '銀行報價 (Offer)', 'Implied_Price': '理論價格 (Theoretical)', 'Display_Gap': '價差 (Gap)', 'Years_Remaining': '剩餘年期', 'User_Duration': '存續期間 (Dur)', 'Annual_Coupon_Amt': '預估年息', 'Rating_Source': '信評', 'Cycle_Str': '配息月份'}
+                final_cols = [c for c in cols if c in portfolio.columns]
+                display_df = portfolio[final_cols].rename(columns=rename_dict).copy()
+                for c in ['銀行報價 (Offer)', '理論價格 (Theoretical)', '價差 (Gap)', '剩餘年期', '存續期間 (Dur)']:
+                    if c in display_df.columns: display_df[c] = display_df[c].map('{:.2f}'.format)
+                if '預估年息' in display_df.columns: display_df['預估年息'] = display_df['預估年息'].map('{:,.0f}'.format)
+                st.dataframe(display_df, hide_index=True, use_container_width=True)
                 
-            with tabs[3]:
-                st.info("💡 輸入股票代碼查看機構簡介")
-                ticker_input = st.text_input("輸入代碼 (例: AAPL)", value="AAPL")
-                if ticker_input:
-                    show_tradingview_widget_zoomed(ticker_input)
+                st.markdown("### 📊 投資組合健康度")
+                p1, p2 = st.columns(2)
+                with p1:
+                    fig_rating = px.pie(portfolio, names='Rating_Source', values='Weight', title='信評分佈')
+                    st.plotly_chart(fig_rating, use_container_width=True)
+                with p2:
+                    if 'Issuer_Clean' in portfolio.columns: pie_col = 'Issuer_Clean'
+                    else: pie_col = 'Name'
+                    issuer_weights = portfolio.groupby(pie_col)['Weight'].sum().reset_index().sort_values('Weight', ascending=False)
+                    if len(issuer_weights) > 5:
+                        top5 = issuer_weights.head(5)
+                        others = pd.DataFrame([{pie_col: 'Others', 'Weight': issuer_weights.iloc[5:]['Weight'].sum()}])
+                        issuer_weights = pd.concat([top5, others])
+                    fig_issuer = px.pie(issuer_weights, names=pie_col, values='Weight', title='發行機構分佈 (Smart Grouping)')
+                    st.plotly_chart(fig_issuer, use_container_width=True)
+
+            with c2:
+                tabs = st.tabs(["🎲 蒙地卡羅模擬 (銷售賦能)", "💰 現金流", "🏢 機構透視"])
+                
+                with tabs[0]:
+                    if sim_df is not None:
+                        win_rate = 100 - sim_stats['probability_loss']
+                        upside = sim_stats['best_5_pct']
+                        
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric(f"🏆 持有{horizon_years}年勝率", f"{win_rate:.1f}%", delta_color="normal")
+                        m2.metric(f"📈 累積總報酬 (平均)", f"{sim_stats['mean_return']:.2f}%")
+                        m3.metric("🚀 潛在爆發力 (Upside)", f"+{upside:.2f}%")
+                        
+                        st.success(f"""
+                        **💡 專業銷售觀點 (Sales Talk)：**
+                        根據大數據模擬 1,000 種市場情境，若您將此投資組合持有滿 **{horizon_years} 年**：
+                        1.  **高勝率**：數據顯示，您有 **{win_rate:.1f}%** 的機率是獲利的（正報酬）。
+                        2.  **穩健收益**：在正常市場波動下，預期累積報酬約為 **{sim_stats['mean_return']:.2f}%**（含息收與價差）。
+                        3.  **時間複利**：隨著持有時間拉長，債券配息將逐漸抵銷價格波動風險，顯著提升資產安全性。
+                        """)
+                        
+                        fig_mc = px.histogram(sim_df, x="Total_Return_Pct", nbins=50, 
+                                              title=f"持有 {horizon_years} 年後總報酬率分佈模擬 (右側為獲利區)",
+                                              labels={'Total_Return_Pct': '總報酬率 (%)'},
+                                              color_discrete_sequence=['#2ecc71'])
+                        fig_mc.add_vline(x=0, line_width=2, line_color="black")
+                        st.plotly_chart(fig_mc, use_container_width=True)
+
+                with tabs[1]:
+                    fig_cf = px.bar(cf_df, x='Month', y='Amount', text_auto=',.0f', title="預估現金流")
+                    st.plotly_chart(fig_cf, use_container_width=True)
+                    with st.expander("查看詳細配息日曆"):
+                        st.dataframe(cf_detail_df, use_container_width=True)
+                
+                with tabs[2]:
+                    st.info("💡 輸入股票代碼查看機構簡介")
+                    ticker_input = st.text_input("輸入代碼 (例: AAPL)", value="AAPL")
+                    if ticker_input:
+                        show_tradingview_widget_zoomed(ticker_input)
 
 else:
     st.info("👆 請在上方選擇「公用報價檔」或「上傳新檔案」以開始分析。")
 
+st.markdown("---")
 st.markdown("""
-<div style='background-color: #f0f2f6; padding: 10px; border-radius: 5px; color: #555; font-size: 0.9em;'>
-    <strong>⚠️ 免責聲明</strong>：蒙地卡羅模擬乃基於常態分佈假設之數學推估，僅供風險參考，不代表未來實際獲利保證。
+<div style='background-color: #ffe6e6; padding: 10px; border-radius: 5px; color: #cc0000;'>
+    <strong>⚠️ 投資風險警語 (Disclaimer)</strong><br>
+    1. 本工具僅供投資試算與模擬使用，不代表任何形式之投資建議或獲利保證。<br>
+    2. 債券價格、殖利率與配息金額均會隨市場波動，實際交易價格與條件請以銀行當下報價為準。<br>
+    3. 蒙地卡羅模擬乃基於常態分佈假設之數學推估，僅供風險參考，不代表未來實際獲利保證。
 </div>
 """, unsafe_allow_html=True)
