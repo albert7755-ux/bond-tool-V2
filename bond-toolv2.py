@@ -12,7 +12,7 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V38.0)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V38.1)", layout="wide")
 
 # ==========================================
 # 🔐 密碼保護機制
@@ -370,7 +370,7 @@ def run_cash_flow_strategy(df, allow_dup, freq_type):
     if selected: return pd.DataFrame(selected)
     return pd.DataFrame()
 
-# --- 蒙地卡羅模擬函式 (支援自訂年期) ---
+# --- 蒙地卡羅模擬函式 ---
 def run_monte_carlo_simulation(portfolio, investment_amt, simulations=1000, horizon_years=1):
     if portfolio.empty: return None
 
@@ -379,27 +379,16 @@ def run_monte_carlo_simulation(portfolio, investment_amt, simulations=1000, hori
     else:
         w_duration = (portfolio['Years_Remaining'] * portfolio['Weight']).sum()
         
-    # 計算平均年化殖利率
     w_ytm = (portfolio['YTM'] * portfolio['Weight']).sum() / 100.0
-    
-    # 假設利率年波動率
     rate_volatility = 0.01 
-    
     np.random.seed(42)
     rate_shocks = np.random.normal(0, rate_volatility, simulations)
     results = []
     
     for shock in rate_shocks:
-        # 1. 價格風險：-D * delta_y (雖然這是瞬間風險，但作為保守估計)
-        # 注意：實務上持有越久，Duration 會變短，這裡做簡化保守估計
         price_return = -1 * w_duration * shock
-        
-        # 2. 時間複利：YTM * 年數 (這是重點！時間越長，領息越多)
         income_return = w_ytm * horizon_years
-        
-        # 總報酬 = 價格變動 + 累積配息
         total_return_pct = price_return + income_return
-        
         total_return_amt = investment_amt * total_return_pct
         final_value = investment_amt + total_return_amt
         results.append({
@@ -493,7 +482,6 @@ if file_to_process:
         if strategy not in ["收益最大化", "自選組合"]:
             allow_dup = st.sidebar.checkbox("允許機構重複?", value=True)
 
-        # --- 新增: 模擬年期滑桿 ---
         st.sidebar.markdown("---")
         st.sidebar.header("⏱️ 模擬設定")
         horizon_years = st.sidebar.slider("預計持有年期 (年)", 1, 10, 1, help="拉長持有年期，通常能降低虧損機率並提高勝率。")
@@ -556,10 +544,10 @@ if file_to_process:
         elif strategy == "債券梯":
             ladder_mode = st.sidebar.radio("梯型模式", ["標準", "自訂"])
             if ladder_mode == "標準":
-                steps = [(1,2),(2,3),(3,4),(4,5)] # 預設短梯
+                steps = [(1,2),(2,3),(3,4),(4,5)] 
                 num_bonds = 4
             else:
-                steps = [(1,3), (3,5), (5,7)] # 簡化範例
+                steps = [(1,3), (3,5), (5,7)] 
                 num_bonds = 3
             if st.sidebar.button("🚀 計算", type="primary"):
                 portfolio = run_ladder(df_clean, steps, allow_dup, num_bonds)
@@ -575,6 +563,13 @@ if file_to_process:
         elif strategy == "相對價值":
             min_dur = st.sidebar.number_input("最低剩餘年期", 2.0)
             top_n = st.sidebar.slider("挑選幾檔", 3, 10, 5)
+            
+            # --- [修復] 補回遺失的變數定義 ---
+            target_rating = st.sidebar.multiselect("篩選信評", sorted(df_clean['Rating_Source'].unique()))
+            available_freqs = sorted(df_clean['Frequency'].unique())
+            target_freqs = st.sidebar.multiselect("篩選配息頻率", options=available_freqs, placeholder="全選")
+            # --------------------------------
+            
             if st.sidebar.button("🚀 計算", type="primary"):
                 df_t = df_clean[df_clean['Rating_Source'].isin(target_rating)] if target_rating else df_clean
                 portfolio, df_calc = run_relative_value(df_t, allow_dup, top_n, min_dur, target_freqs)
