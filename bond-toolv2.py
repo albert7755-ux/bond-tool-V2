@@ -12,7 +12,7 @@ import os
 import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="債券策略大師 Pro (V38.1)", layout="wide")
+st.set_page_config(page_title="債券策略大師 Pro (V38.2)", layout="wide")
 
 # ==========================================
 # 🔐 密碼保護機制
@@ -564,11 +564,10 @@ if file_to_process:
             min_dur = st.sidebar.number_input("最低剩餘年期", 2.0)
             top_n = st.sidebar.slider("挑選幾檔", 3, 10, 5)
             
-            # --- [修復] 補回遺失的變數定義 ---
+            # [修正] 補回變數定義
             target_rating = st.sidebar.multiselect("篩選信評", sorted(df_clean['Rating_Source'].unique()))
             available_freqs = sorted(df_clean['Frequency'].unique())
             target_freqs = st.sidebar.multiselect("篩選配息頻率", options=available_freqs, placeholder="全選")
-            # --------------------------------
             
             if st.sidebar.button("🚀 計算", type="primary"):
                 df_t = df_clean[df_clean['Rating_Source'].isin(target_rating)] if target_rating else df_clean
@@ -629,6 +628,10 @@ if file_to_process:
             st.divider()
             avg_ytm = (portfolio['YTM'] * portfolio['Weight']).sum()
             avg_rating_str = get_weighted_average_rating(portfolio)
+            
+            # [修復] 補上變數定義
+            total_coupon = portfolio['Annual_Coupon_Amt'].sum()
+            avg_price = (portfolio['Final_Price'] * portfolio['Weight']).sum()
 
             k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("預期年化殖利率", f"{avg_ytm:.2f}%")
